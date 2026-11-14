@@ -519,7 +519,30 @@ object BackgroundOperation {
     /** Called with the display id after a screen is released, so per-display caches can be dropped. */
     fun onScreenReleased(listener: (Int) -> Unit) { releaseListeners += listener }
 
+    // ── LaunchGuard marker file ──────────────────────────────────────────
+    // The LSPosed launch guard (xposed/LaunchGuardHook, loaded into
+    // system_server) reads this file with a single stat() to know whether
+    // a sub-screen is up. Written on display create/takeover/adopt,
+    // removed on teardown. A stale file after a crash is harmless: the
+    // hook still checks the display name before redirecting anything.
+    private fun markerFile(): java.io.File? {
+        return runCatching {
+            val dir = ctx().getExternalFilesDir(null)
+                ?: java.io.File("/storage/emulated/0/Android/data/com.kilon.agentvscreen/files")
+            java.io.File(dir, "avs_active")
+        }.getOrNull()
+    }
+
+    private fun markScreenActive() {
+        runCatching { markerFile()?.apply { parentFile?.mkdirs(); createNewFile() } }
+    }
+
+    private fun clearScreenActive() {
+        runCatching { markerFile()?.delete() }
+    }
+
     private fun releaseScreen(reason: String) {
+        clearScreenActive()
         cancelIdleRelease()
         mainHandler.removeCallbacks(idlePark)
         mainHandler.removeCallbacks(emptyCheck)
@@ -768,6 +791,7 @@ object BackgroundOperation {
                         note = tr("接手了上一轮留下的副屏（display ${cur.displayId}）", "Took over the screen left by the last turn (display ${cur.displayId})"))
                 }
                 AppLogger.info(TAG, "session $sid took over idle display ${cur.displayId} from $prev")
+                markScreenActive()
                 return cur
             }
         }
@@ -838,6 +862,7 @@ object BackgroundOperation {
 
     /** Wire a new screen: preview size follows its upright size; input goes through its frame->input map. */
     private fun setupGeometry(d: VScreenDisplay) {
+        markScreenActive()
         if (mapperInstalled.compareAndSet(false, true)) {
             VScreenShell.mapper = { id, x, y -> display?.takeIf { it.displayId == id && !it.released }?.toInput(x, y) ?: (x to y) }
         }
