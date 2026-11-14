@@ -116,6 +116,15 @@ object VScreenTerminal {
     private val lock = Any()
     private var nextId = 1L
 
+    /**
+     * 持久历史里已有的最大 id 往后接：进程重启后 nextId 从 1 重来，会跟文件里的
+     * 旧条目撞号——历史页 LazyColumn 用 id 做 key，撞号就整进程闪退（round33
+     * 根因）。只往前、不往后；由 [VScreenTerminalHistory.init] 在服务起来时调。
+     */
+    fun seedNextId(fromId: Long) {
+        synchronized(lock) { if (fromId > nextId) nextId = fromId }
+    }
+
     /** 跑一条命令，记进 [log]，返回这条记录。不要在主线程调。 */
     fun run(command: String, timeoutMs: Long = DEFAULT_TIMEOUT_MS): Entry {
         // Pop the floating window up on the terminal page so the user can see the command run — even
