@@ -98,12 +98,16 @@ class LaunchGuardHook : IXposedHookLoadPackage {
     private class LaunchGuardCallback(private val intentIndex: Int) : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             try {
-                // When no virtual display is up, do not intercept at all.
-                // The app maintains a marker file (written on display
-                // create, removed on teardown) that this hook reads with a
-                // single stat(). Without it, every launcher tap pays for a
-                // display enumeration even when the sub-screen is off.
-                if (!isSubScreenActive()) return
+                // No marker-file gate here (round 27): the app writes
+                // avs_active into its external files dir, but scoped
+                // storage (FUSE, per-app isolation) makes it invisible
+                // to system_server (uid 1000 gets Permission denied),
+                // so the old File.exists() check always returned false
+                // and the hook never intercepted anything — installed
+                // fine, but dead. The cheap display-name check inside
+                // hasTaskOnOtherDisplay is the gate now: it is
+                // in-process (DisplayManagerGlobal), and the task
+                // enumeration only runs when our sub-screen is up.
                 val intent = param.args[intentIndex] as? Intent ?: return
                 // Only guard launcher taps. The agent's own launches use
                 // `am start --display <virtualId> -n <component>` with no
@@ -127,28 +131,6 @@ class LaunchGuardHook : IXposedHookLoadPackage {
     }
 
     companion object {
-        /**
-         * True when the Agent-VScreen sub-screen has a display up, read
-         * from the marker file the app maintains in its external files
-         * dir (system_server can read it with no permission). A single
-         * File.exists() — no Binder, no reflection — so a launcher tap
-         * when the sub-screen is off costs ~nothing. Any read failure
-         * fails open (true) so the guard keeps working, and a stale file
-         * (app killed before teardown) only falls back to the display
-         * check below, never to a wrong redirect.
-         */
-        private fun isSubScreenActive(): Boolean {
-            return try {
-                java.io.File(
-                    "/storage/emulated/0/Android/data/" +
-                        "com.kilon.agentvscreen/files/avs_active",
-                ).exists()
-            } catch (t: Throwable) {
-                XposedBridge.log(t)
-                true
-            }
-        }
-
         /**
          * True when [targetPackage] has a task on any display other than the
          * primary display (display 0). Called from the ATMS.startActivity
