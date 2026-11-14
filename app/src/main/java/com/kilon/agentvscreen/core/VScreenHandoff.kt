@@ -105,6 +105,9 @@ internal object VScreenHandoff {
         if (BackgroundOperation.state.value.ownerSessionId != sessionId) return
         if (runCatching { tasksOn(displayId) }.getOrDefault(emptyList()).isNotEmpty()) return
         BackgroundOperation.releaseNow(sessionId)
+        // The user is now using the moved app on the main screen: fold the floating window into
+        // its edge tab so it does not cover that app. Only the released (empty) screen docks.
+        BackgroundOperation.requestDockAfterMove()
     }
 
     /** The user's own button (full-screen view): put the app on the background screen in front of them. */
