@@ -552,6 +552,9 @@ object Overlay {
     /** While a finger holds the tab and pulls it inward: open the window under the finger, held near its edge side. */
     internal fun undockAt(fingerX: Float, fingerY: Float) {
         stopAnim()
+        // The user unfolded by hand: a pending fold-after-move request is spent, or a later
+        // re-attach would fold the window again against their will.
+        BackgroundOperation.clearDockRequest()
         val right = dockRight.value
         docked.value = false
         val w = widthPx.floatValue + dp(12f)
@@ -569,6 +572,9 @@ object Overlay {
 
     internal fun undock() {
         val l = lp ?: return
+        // Unfolding by hand (or by a shell command popping the window) spends a pending
+        // fold-after-move request, or a later re-attach would fold the window again.
+        BackgroundOperation.clearDockRequest()
         docked.value = false
         val w = widthPx.floatValue + dp(12f)
         val h = w / aspect()
@@ -901,6 +907,15 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     // switched it to TERMINAL; a hand switch back is respected until the next command pops it again.
     LaunchedEffect(s.terminalPopAt) {
         if (s.terminalPopAt > 0L && Overlay.docked.value) Overlay.undock()
+    }
+    // The app was moved to the main screen and its empty screen released: fold the window into its
+    // edge tab, so it does not cover the app the user is now using on the main screen. Only the
+    // move path sets this; a shell command or a new screen never does.
+    LaunchedEffect(s.dockRequested) {
+        if (s.dockRequested && !Overlay.docked.value) {
+            Overlay.dock(Overlay.dockRight.value)
+            BackgroundOperation.clearDockRequest()
+        }
     }
     val haptic = LocalHapticFeedback.current
     // The keyboard bridge closes when the user hands the screen back or leaves the screen page.
