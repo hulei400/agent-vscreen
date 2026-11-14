@@ -28,8 +28,8 @@ internal fun VScreenOffloadHandler.shellCmd(
         .coerceIn(1_000L, VScreenTerminal.MAX_TIMEOUT_MS)
     val e = VScreenTerminal.run(command, timeoutMs)
     if (e.notReady) return err("NOT_CONNECTED",
-        tr("Shizuku 没就绪，命令没有跑：${e.stderr}。vscreen fix not_connected，或请用户打开 Agent-VScreen。",
-            "Shizuku is not ready, the command did not run: ${e.stderr}. Run vscreen fix not_connected, or ask the user to open Agent-VScreen."))
+        tr("root 没就绪，命令没有跑：${e.stderr}。请用户打开 Agent-VScreen，点允许 KernelSU 的 root 授权。",
+            "Root is not ready, the command did not run: ${e.stderr}. Ask the user to open Agent-VScreen and allow the KernelSU root authorization."))
     val body = buildString {
         append("$ ").append(e.command).append('\n')
         if (e.stdout.isNotEmpty()) append(e.stdout.trimEnd('\n')).append('\n')

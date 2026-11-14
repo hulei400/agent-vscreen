@@ -7,9 +7,9 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * 终端：跑 shell 命令并记下全文。
  *
- * 命令走 Shizuku（uid 2000，不是 root），和虚拟屏里别的操作同一条路
- * （[VScreenShell.run] → ShizukuManager.runProcess）。[run] 会等命令自己
- * 结束，不要在主线程调。
+ * 命令以 root（uid 0）跑：每次单独起 `su -c`（KernelSU），不走 Shizuku，
+ * 和虚拟屏里别的操作不是同一条路。第一次跑时手机可能弹一次 KernelSU
+ * 的 root 授权，点允许就行。[run] 会等命令自己结束，不要在主线程调。
  *
  * 记录分两份：内存里的 [log] 只留最近 50 条、进程死了就没了，悬浮窗的
  * “终端”页读它；另外 [VScreenTerminalHistory] 把每条跑完的命令持久存到
@@ -29,12 +29,12 @@ object VScreenTerminal {
         val command: String,
         val stdout: String,
         val stderr: String,
-        /** 0 = 成功；124 = 超时（已终止）；126 = Shizuku 没就绪。 */
+        /** 0 = 成功；124 = 超时（已终止）；126 = root 没就绪（su 起不来或被拒）。 */
         val exitCode: Int,
         val durationMs: Long,
     ) {
         val timedOut: Boolean get() = exitCode == 124
-        val notReady: Boolean get() = exitCode == 126 && stderr.startsWith("shizuku not ready")
+        val notReady: Boolean get() = exitCode == 126 && stderr.startsWith("root not ready")
     }
 
     /** 最多留几条记录。 */
@@ -47,8 +47,65 @@ object VScreenTerminal {
 
     /** Test seam：单测换成假的执行器。 */
     @Volatile var executor: (String, Long) -> ShellResult = { command, timeoutMs ->
-        val r = VScreenShell.run(arrayOf("sh", "-c", command), timeoutMs)
-        ShellResult(r.exitCode, r.stdout, r.stderr)
+        runAsRoot(command, timeoutMs)
+    }
+
+    /**
+     * 以 root 跑一条命令：每次单独起 `su -c`，不走 Shizuku（KernelSU root，
+     * uid 0）。stdout/stderr 各用一个线程同时读，避免任一满了就卡死；
+     * 超时到了就杀进程、返回 124；`su` 起不来或被拒时返回 126（stderr
+     * 以 "root not ready" 开头），不静默降级回 Shizuku。
+     */
+    private fun runAsRoot(command: String, timeoutMs: Long): ShellResult {
+        val process = try {
+            ProcessBuilder("su", "-c", command).start()
+        } catch (e: Exception) {
+            return ShellResult(126, "", "root not ready: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        val outData = java.io.ByteArrayOutputStream()
+        val errData = java.io.ByteArrayOutputStream()
+        val outThread = drainThread(process.inputStream, outData)
+        val errThread = drainThread(process.errorStream, errData)
+        val finished = try {
+            process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (!finished) {
+            process.destroyForcibly()
+            outThread.join(500); errThread.join(500)
+            return ShellResult(124, outData.toString(Charsets.UTF_8), errData.toString(Charsets.UTF_8))
+        }
+        outThread.join(1000); errThread.join(1000)
+        val code = process.exitValue()
+        val stdout = outData.toString(Charsets.UTF_8)
+        val stderr = errData.toString(Charsets.UTF_8)
+        // root 被拒：su 没跑成命令（KernelSU/Magisk 拒绝时退出非 0，stderr 里写 Permission denied）。
+        if (code != 0 && stdout.isEmpty() && stderr.contains("denied", ignoreCase = true)) {
+            return ShellResult(126, stdout, "root not ready: $stderr")
+        }
+        return ShellResult(code, stdout, stderr)
+    }
+
+    /**
+     * 把 [input] 读进 [sink]。只存前面 MAX_OUTPUT_CHARS + 1 字节，多了的
+     * 继续读但丢掉——既不会把内存撑爆，[run] 里的 [cap] 也还能认出被
+     * 截断并注明；一直读到底，子进程写满管道时不会卡死。
+     */
+    private fun drainThread(input: java.io.InputStream, sink: java.io.ByteArrayOutputStream): Thread {
+        val limit = MAX_OUTPUT_CHARS + 1
+        return Thread {
+            input.use { stream ->
+                val buf = ByteArray(4096)
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n < 0) break
+                    val room = limit - sink.size()
+                    if (room > 0) sink.write(buf, 0, minOf(n, room))
+                }
+            }
+        }.apply { isDaemon = true; start() }
     }
 
     private val _log = MutableStateFlow<List<Entry>>(emptyList())
