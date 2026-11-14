@@ -66,6 +66,10 @@ object BackgroundOperation {
 
     enum class Privilege { NOT_INSTALLED, NOT_RUNNING, NOT_AUTHORIZED, READY }
 
+    /** Which page the floating window and the full-screen page show — one shared state: a switch in
+     * either place moves both. SCREEN = the background screen's picture, TERMINAL = the shell log. */
+    enum class ViewPage { SCREEN, TERMINAL }
+
     data class State(
         val enabled: Boolean = false,
         val showPreview: Boolean = true,
@@ -114,6 +118,9 @@ object BackgroundOperation {
          * pops the window even after the user closed it — the next command pops it again.
          */
         val terminalPopAt: Long = 0L,
+        /** Which page the floating window and the full-screen page show (shared: a switch in either
+         * place moves both). A shell command flips it to TERMINAL; a screen appearing flips it to SCREEN. */
+        val page: ViewPage = ViewPage.SCREEN,
         /** 1.1: what the agent says it is doing (`vscreen title`), shown on the window's pill; cleared with the turn. */
         val agentTitle: String? = null,
     )
@@ -460,7 +467,7 @@ object BackgroundOperation {
         restoreDownscale()
         // The page the flags were about is gone with the screen: the next screen starts with nothing to re-read.
         synchronized(lock) { tasks.values.forEach { it.rereadRequired = false; it.rereadReason = null } }
-        _state.update { it.copy(displayId = null, ownerSessionId = null, takeoverSessionId = null, operating = false, note = reason) }
+        _state.update { it.copy(displayId = null, ownerSessionId = null, takeoverSessionId = null, operating = false, note = reason, page = ViewPage.TERMINAL) }
         AppLogger.info(TAG, "released display ${d.displayId} gen=${d.generation}: $reason")
     }
 
@@ -574,13 +581,16 @@ object BackgroundOperation {
     /**
      * A shell command ran: pop the floating window up on the terminal page so the user can see what the
      * agent is doing, even with no screen (no display) and even after the user closed the window with × —
-     * the next command pops it again. Called from the terminal's run path (any thread; the overlay picks
-     * it up on Main and forces its tab to the terminal page). The preview toggle is still respected: if
-     * the user turned the floating window off, this does not force it back on.
+     * the next command pops it again. Called from the terminal's run path (any thread; the shared page
+     * state flips to TERMINAL, so the floating window and the full-screen page both show it). The preview
+     * toggle is still respected: if the user turned the floating window off, this does not force it back on.
      */
     fun popTerminalWindow() {
-        _state.update { it.copy(terminalPopAt = System.currentTimeMillis(), windowHidden = false) }
+        _state.update { it.copy(terminalPopAt = System.currentTimeMillis(), windowHidden = false, page = ViewPage.TERMINAL) }
     }
+
+    /** Switch the page the floating window and the full-screen page show (one shared state). */
+    fun setPage(page: ViewPage) { _state.update { if (it.page == page) it else it.copy(page = page) } }
 
     /**
      * 1.1.6: one text for every USER_STOPPED refusal, so the agent can tell the user exactly when it happened and how to
@@ -671,7 +681,7 @@ object BackgroundOperation {
                 val prev = s.ownerSessionId
                 if (!tasks.containsKey(sid)) tasks[sid] = TaskInfo(sid)
                 _state.update {
-                    it.copy(ownerSessionId = sid, idle = false, takeoverSessionId = null,
+                    it.copy(ownerSessionId = sid, idle = false, takeoverSessionId = null, page = ViewPage.SCREEN,
                         note = tr("接手了上一轮留下的副屏（display ${cur.displayId}）", "Took over the screen left by the last turn (display ${cur.displayId})"))
                 }
                 AppLogger.info(TAG, "session $sid took over idle display ${cur.displayId} from $prev")
@@ -709,7 +719,7 @@ object BackgroundOperation {
                     hostRestartNote = why
                     rememberHostPid()
                     _state.update {
-                        it.copy(displayId = d.displayId, generation = d.generation, ownerSessionId = sid, idle = false,
+                        it.copy(displayId = d.displayId, generation = d.generation, ownerSessionId = sid, idle = false, page = ViewPage.SCREEN,
                             note = tr("接回了上次留下的副屏（$why）", "Picked up the screen left last time ($why)"))
                     }
                     AppLogger.info(TAG, "adopted display ${d.displayId} for $sid")
@@ -730,7 +740,7 @@ object BackgroundOperation {
             rememberHostPid()
             if (!tasks.containsKey(sid)) tasks[sid] = TaskInfo(sid)
             _state.update {
-                it.copy(displayId = d.displayId, generation = d.generation, ownerSessionId = sid, idle = false, note = null)
+                it.copy(displayId = d.displayId, generation = d.generation, ownerSessionId = sid, idle = false, note = null, page = ViewPage.SCREEN)
             }
             // Keyboard must never pop up on the user's screen for this display.
             val ime = runCatching { VScreenShell.hideImeOn(ctx(), d.displayId) }.getOrNull()
