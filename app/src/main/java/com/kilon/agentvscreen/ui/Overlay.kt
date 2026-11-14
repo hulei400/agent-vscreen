@@ -870,6 +870,15 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     // （接管后点输入框弹系统键盘），这里不再为终端或打字行改获焦。
     var tab by remember { mutableStateOf(TermTab.SCREEN) }
     val termLog by VScreenTerminal.log.collectAsState()
+    // A shell command just finished: if there is no live screen to look at,
+    // show its output on the terminal tab instead of the picture tab spinning
+    // on nothing. A screen with an app running is left alone — and the user
+    // can always switch back by hand; this only fires when a command lands.
+    LaunchedEffect(termLog.size) {
+        if (termLog.isEmpty()) return@LaunchedEffect
+        if (tab != TermTab.SCREEN) return@LaunchedEffect
+        if (!hasLiveScreenApp()) tab = TermTab.TERMINAL
+    }
     val haptic = LocalHapticFeedback.current
     // The keyboard bridge closes when the user hands the screen back or leaves the screen tab.
     LaunchedEffect(mode, tab) {
