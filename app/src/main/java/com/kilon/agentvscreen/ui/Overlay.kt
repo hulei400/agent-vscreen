@@ -766,6 +766,7 @@ private class GestureFrame(ctx: Context) : FrameLayout(ctx) {
                         onControl -> super.dispatchTouchEvent(ev)
                         else -> {}
                     }
+                    Claim.HELD -> {}
                 }
                 return true
             }
