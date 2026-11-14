@@ -196,8 +196,10 @@ object BackgroundOperation {
     // screen is released (round19's releaseEmptyScreen, which checks again).
     // A still page of a live app is never released: its task is still there.
 
-    /** How often the watchdog looks, while a screen is live. */
-    private const val EMPTY_CHECK_INTERVAL_MS = 15_000L
+    /** How often the watchdog looks, while a screen is live. v25: 5 s (was
+     *  15 s) — a stolen screen used to sit on its dead frame for 30 s+ before
+     *  the next check; with a 5 s picture-staleness bar, 5–10 s is enough. */
+    private const val EMPTY_CHECK_INTERVAL_MS = 5_000L
     /** A picture older than this counts as stale (the producer stopped). */
     private const val STALE_FRAME_MS = 5_000L
 
