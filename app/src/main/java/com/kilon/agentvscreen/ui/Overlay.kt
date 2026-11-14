@@ -884,6 +884,28 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     // command. Everything that needs a screen (picture, takeover) is guarded below.
     val owner = s.ownerSessionId
     val mode = modeOf(s)
+    // The window can be folded into its edge tab (docked) or unfolded. Two requests move it: a
+    // shell command unfolds it so the user sees the command, a move to the main screen folds it so
+    // it does not cover the app the user is now using. Both effects live above the docked early
+    // return, so they run while the window is folded — below it, a command could never unfold it
+    // again. Each effect only acts on a request newer than the last one it handled, and when both
+    // requests are pending the newer one wins (the timestamps are compared), so the two never
+    // fight over the window. `lastPopAt` starts at the current pop time so a re-attach does not
+    // re-expand a window the user folded by hand for an old command.
+    var lastPopAt by remember { mutableLongStateOf(s.terminalPopAt) }
+    LaunchedEffect(s.terminalPopAt) {
+        val at = s.terminalPopAt
+        if (at > lastPopAt) {
+            lastPopAt = at
+            if (at > 0L && at > s.dockRequestedAt && Overlay.docked.value) Overlay.undock()
+        }
+    }
+    LaunchedEffect(s.dockRequested) {
+        if (s.dockRequested) {
+            if (s.dockRequestedAt >= s.terminalPopAt && !Overlay.docked.value) Overlay.dock(Overlay.dockRight.value)
+            BackgroundOperation.clearDockRequest()
+        }
+    }
     if (Overlay.docked.value) { DockTab(mode, Overlay.dockRight.value); return }
     val density = LocalDensity.current
     val landscape = Overlay.aspect() > 1f
@@ -902,21 +924,6 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     // 一边切了另一边也跟着切。终端页是只读的（命令由 agent 跑，`vscreen shell`）；窗口的获焦只归
     // 输入法桥管（接管后点输入框弹系统键盘），这里不再为终端或打字行改获焦。
     val termLog by VScreenTerminal.log.collectAsState()
-    // A shell command popped the window up: unfold it if it was folded into its edge tab, so the user
-    // actually sees the command. The page itself is shared state now — popTerminalWindow already
-    // switched it to TERMINAL; a hand switch back is respected until the next command pops it again.
-    LaunchedEffect(s.terminalPopAt) {
-        if (s.terminalPopAt > 0L && Overlay.docked.value) Overlay.undock()
-    }
-    // The app was moved to the main screen and its empty screen released: fold the window into its
-    // edge tab, so it does not cover the app the user is now using on the main screen. Only the
-    // move path sets this; a shell command or a new screen never does.
-    LaunchedEffect(s.dockRequested) {
-        if (s.dockRequested && !Overlay.docked.value) {
-            Overlay.dock(Overlay.dockRight.value)
-            BackgroundOperation.clearDockRequest()
-        }
-    }
     val haptic = LocalHapticFeedback.current
     // The keyboard bridge closes when the user hands the screen back or leaves the screen page.
     LaunchedEffect(mode, s.page) {
