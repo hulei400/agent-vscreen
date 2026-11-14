@@ -166,6 +166,22 @@ in：把用户主屏上的应用移到副屏接着做（返回四段；手机上
 
 权限范围: `look`
 
+### `shell <命令> [--timeout <时长>] [--clear] [--history]`
+
+在手机上跑一条 shell 命令（Shizuku，uid 2000，不是 root）：返回命令全文、stdout、stderr 和退出码；这次跑的也记进终端记录，悬浮窗的“终端”页能看到。
+
+不要跑交互式的东西（它等命令自己结束）；超时默认 30 秒（--timeout 最长 120 秒，超时按 124 返回，已输出的部分还在）。
+
+不带命令 = 列出最近的终端记录；--history 只列跑过的命令；--clear 清空记录。
+
+例：shell "ls /data/local/tmp"、shell "dumpsys battery | grep level" --timeout 10s
+
+- `--timeout <时长>` 最多等多久（默认 30 秒，最长 120 秒）
+- `--clear` 清空终端记录
+- `--history` 只列出跑过的命令
+
+权限范围: `system`
+
 ## 结果代码
 
 | code | next | 含义 |

@@ -17,7 +17,9 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ViewConfiguration
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -35,6 +37,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -45,6 +53,7 @@ import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -56,6 +65,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,14 +73,22 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -89,6 +107,8 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.kilon.agentvscreen.api.Turns
 import com.kilon.agentvscreen.core.BackgroundOperation
 import com.kilon.agentvscreen.core.VScreenShell
+import com.kilon.agentvscreen.core.VScreenTerminal
+import com.kilon.agentvscreen.core.VScreenTyping
 import com.kilon.agentvscreen.host.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -120,9 +140,16 @@ import kotlin.math.roundToInt
  *  - let go (or glide) with a good part of it past any of the four edges: it folds into the tab on the nearer side
  *    (tap the tab to bring it back);
  *  - two fingers pinch to resize, anchored at the point between them (120 dp … 85 % of the screen);
- *  - hold one finger still for 1 s to take over (a ring fills); a light tap only shows these hints;
+ *  - hold one finger still for 1 s to take over (a ring fills); a light tap only shows these hints; the “接管”
+ *    pill at the bottom right takes over at once (with a vibration), and “交还 AI” hands back — the window is
+ *    view-only by default, never operable by accident;
  *  - while you hold the screen, taps / swipes / long presses on the picture go to the background screen, and you move
- *    the window by its title pill.
+ *    the window by its title pill. The “键盘” pill (while you hold the screen) opens a typing row: what you type goes
+ *    into the focused input box on the background screen.
+ *  - the “终端” pill at the top right switches the picture to the terminal: every `vscreen shell` run and every
+ *    command typed in the window is listed there in full (command, stdout, stderr, exit code), newest at the bottom,
+ *    with a command line of its own. The window becomes focusable while the terminal is open so the keyboard works.
+ * Buttons (1.1.6: one job per place, so a quick double tap can never stop the AI by accident):
  * Buttons (1.1.6: one job per place, so a quick double tap can never stop the AI by accident):
  *  - top right: ⤢ full screen and × close. × is always there and always one tap: while the AI works it only hides the
  *    window for this turn (the AI goes on; the notification can bring it back); when nothing runs it closes the screen.
@@ -175,6 +202,22 @@ object Overlay {
 
     /** Re-check after the overlay permission was granted. */
     fun refresh() { val s = BackgroundOperation.state.value; if (s.displayId != null && s.showPreview && !s.windowHidden && !fullscreenOpen.value) show() }
+
+    /**
+     * Let the window take keyboard focus (so a text field in it can open the soft keyboard), or back to
+     * not focusable. The window is not focusable by default: it floats over the user's apps and must never steal
+     * the back key or the keyboard from them. Only the terminal tab and the typing row turn it on, and only while
+     * they are open.
+     */
+    fun setFocusable(on: Boolean) {
+        val v = root ?: return; val l = lp ?: return
+        val flags = if (on) l.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        else l.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        if (flags == l.flags) return
+        l.flags = flags
+        runCatching { hostWm?.updateViewLayout(v, l) }
+            .onFailure { AppLogger.warning("Overlay", "setFocusable: ${it.message}") }
+    }
 
     /** 1.1.6: the × button. One tap, never a lock: see [BackgroundOperation.closeWindow]. */
     fun closeTapped() {
@@ -791,6 +834,37 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     LaunchedEffect(owner, mode) {
         while (true) { left = Turns.leftMs(owner) ?: -1L; delay(1000) }
     }
+
+    // 流体云：画面 / 终端 切换、打字行。终端打开或打字行打开时窗口可获焦（键盘能弹出来），关掉就恢复不获焦。
+    var tab by remember { mutableStateOf(TermTab.SCREEN) }
+    var typing by remember { mutableStateOf(false) }
+    var kbdText by remember { mutableStateOf("") }
+    val termLog by VScreenTerminal.log.collectAsState()
+    val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
+    val view = LocalView.current
+    val imm = remember { context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager }
+    val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    LaunchedEffect(tab, typing) {
+        Overlay.setFocusable(tab == TermTab.TERMINAL || typing)
+        if (tab != TermTab.TERMINAL && !typing) imm.hideSoftInputFromWindow(view.windowToken, 0)
+    }
+    val sendKbd: () -> Unit = {
+        val t = kbdText.trim()
+        if (t.isNotEmpty()) {
+            kbdText = ""
+            typing = false
+            vscreenUserInput(owner) { id ->
+                runCatching { VScreenTyping.typeText(id, t, append = true) }
+                    .exceptionOrNull()?.let { e ->
+                        mainHandler.post {
+                            Toast.makeText(context, tr("没输进去：${e.message?.take(60)}", "Not typed: ${e.message?.take(60)}"), Toast.LENGTH_SHORT).show()
+                        }
+                    }
+            }
+        }
+    }
     val title = s.agentTitle ?: when (mode) {
         Mode.ACTING -> s.action?.take(18) ?: Palette.word(mode)
         Mode.STANDBY -> if (left >= 0) tr("AI 待命", "AI on standby") + " · ${left / 60000}:${"%02d".format((left / 1000) % 60)}" else Palette.word(mode)
@@ -804,14 +878,16 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                 Modifier.fillMaxSize().clip(RoundedCornerShape(corner)).background(Palette.ink)
                     .onGloballyPositioned { c -> val b = c.boundsInRoot(); Overlay.frameRect.set(b.left, b.top, b.right, b.bottom) },
             ) {
-                if (picture != null) picture(owner) else VScreenLiveFrame(owner, Modifier.fillMaxSize(), interactive = false)
+                if (tab == TermTab.TERMINAL) {
+                    TerminalView(k, termLog) { c -> scope.launch(Dispatchers.IO) { VScreenTerminal.run(c) } }
+                } else if (picture != null) picture(owner) else VScreenLiveFrame(owner, Modifier.fillMaxSize(), interactive = false)
                 // A soft scrim under the pill and buttons keeps them readable on white pages.
                 Box(Modifier.fillMaxWidth().height((44 * k).dp).background(Brush.verticalGradient(listOf(Color(0x99000000), Color.Transparent))))
             }
 
             // Title pill (drag handle while you hold the screen).
             Row(
-                Modifier.align(Alignment.TopStart).padding(start = (8 * k).dp, top = (8 * k).dp).widthIn(max = w - (78 * k).dp)
+                Modifier.align(Alignment.TopStart).padding(start = (8 * k).dp, top = (8 * k).dp).widthIn(max = w - (126 * k).dp)
                     .clip(RoundedCornerShape(50)).background(Color(0xCC12141C))
                     .onGloballyPositioned { c -> val b = c.boundsInRoot(); Overlay.pillRect.set(b.left, b.top, b.right, b.bottom) }
                     .padding(horizontal = (8 * k).dp, vertical = (4 * k).dp),
@@ -822,8 +898,12 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                 Text(title, color = Color.White, fontSize = (11 * k).sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
             }
 
-            // Buttons, top right: full screen, close. Same places in every state.
+            // Buttons, top right: terminal tab, full screen, close. Same places in every state.
             Row(Modifier.align(Alignment.TopEnd).padding(end = (6 * k).dp, top = (6 * k).dp)) {
+                PillBtn(if (tab == TermTab.TERMINAL) tr("画面", "Screen") else tr("终端", "Terminal"), Color(0xCC12141C), Color.White, k, "termTab") {
+                    tab = if (tab == TermTab.TERMINAL) TermTab.SCREEN else TermTab.TERMINAL
+                }
+                Spacer(Modifier.width((5 * k).dp))
                 RoundBtn(Icons.Filled.OpenInFull, tr("全屏", "Full screen"), Color(0xCC12141C), k, "full") { Overlay.openFull() }
                 Spacer(Modifier.width((5 * k).dp))
                 RoundBtn(Icons.Filled.Close, if (mode == Mode.ACTING || mode == Mode.STANDBY || mode == Mode.TAKEOVER) tr("收起小窗", "Hide window") else tr("关闭副屏", "Close screen"),
@@ -864,11 +944,67 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                 }
             }
 
+            // Take over at once (the explicit Fluid Cloud switch; the window is view-only by default), with a vibration.
+            if (mode != Mode.TAKEOVER && mode != Mode.STOPPED) {
+                Row(
+                    Modifier.align(Alignment.BottomEnd).padding(end = (8 * k).dp, bottom = (8 * k).dp).control("takeover")
+                        .clip(RoundedCornerShape(50)).background(Color(0xCC12141C)).clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (s.userStopped) BackgroundOperation.userResume()
+                            BackgroundOperation.beginTakeover(owner)
+                        }
+                        .padding(horizontal = (10 * k).dp, vertical = (5 * k).dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.TouchApp, null, tint = Color.White, modifier = Modifier.size((13 * k).dp))
+                    Spacer(Modifier.width((3 * k).dp))
+                    Text(tr("接管", "Take over"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            // Keyboard, while you hold the screen (screen tab only; the terminal tab has its own command line).
+            if (mode == Mode.TAKEOVER && tab == TermTab.SCREEN) {
+                Row(
+                    Modifier.align(Alignment.BottomEnd).padding(end = (8 * k).dp, bottom = (8 * k).dp).control("kbd")
+                        .clip(RoundedCornerShape(50)).background(if (typing) Palette.brandA else Color(0xCC12141C)).clickable { typing = !typing }
+                        .padding(horizontal = (10 * k).dp, vertical = (5 * k).dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(tr("键盘", "Keyboard"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            // Typing row: what you type goes into the focused input box on the background screen.
+            if (typing && mode == Mode.TAKEOVER && tab == TermTab.SCREEN) {
+                Row(
+                    Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                        .padding(start = (8 * k).dp, end = (8 * k).dp, top = (48 * k).dp)
+                        .clip(RoundedCornerShape(24.dp)).background(Color(0xFF1B1E2A))
+                        .padding(start = (12 * k).dp, end = (6 * k).dp, top = (6 * k).dp, bottom = (6 * k).dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.weight(1f)) {
+                        if (kbdText.isEmpty()) Text(tr("输入到副屏里有焦点的输入框", "Types into the focused input box on the screen"), color = Color(0x88FFFFFF), fontSize = (12 * k).sp)
+                        BasicTextField(kbdText, { kbdText = it }, Modifier.fillMaxWidth().control("kbdInput"), singleLine = true,
+                            textStyle = TextStyle(color = Color.White, fontSize = (12 * k).sp),
+                            cursorBrush = SolidColor(Palette.standby),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = { sendKbd() }))
+                    }
+                    Spacer(Modifier.width((6 * k).dp))
+                    Text(tr("发送", "Send"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.control("kbdSend").clip(RoundedCornerShape(50)).background(Palette.brandA)
+                            .clickable { sendKbd() }.padding(horizontal = (10 * k).dp, vertical = (5 * k).dp))
+                    Spacer(Modifier.width((4 * k).dp))
+                    RoundBtn(Icons.Filled.Close, tr("关闭输入", "Close input"), Color(0x22FFFFFF), k, "kbdClose") { typing = false }
+                }
+            }
+
             // Messages: gesture hints.
             var now by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
             LaunchedEffect(Overlay.hintAt.longValue) { now = SystemClock.uptimeMillis(); delay(3100); now = SystemClock.uptimeMillis() }
             val hint = when {
-                Overlay.hintAt.longValue > 0 && now - Overlay.hintAt.longValue < 2500 -> tr("长按 1 秒接管 · 双指缩放 · 拖到边缘收起 · × 关闭", "Hold 1 s to take over · pinch to resize · drag to an edge to dock · × closes")
+                Overlay.hintAt.longValue > 0 && now - Overlay.hintAt.longValue < 2500 -> tr("点“接管”或长按 1 秒接管 · “终端”看 shell 输出 · 双指缩放 · 拖到边缘收起 · × 关闭", "Tap “Take over” or hold 1 s to take over · “Terminal” shows shell output · pinch to resize · drag to an edge to dock · × closes")
                 else -> null
             }
             AnimatedVisibility(hint != null, Modifier.align(Alignment.Center), enter = fadeIn(), exit = fadeOut()) {
@@ -900,6 +1036,106 @@ private fun RoundBtn(icon: ImageVector, desc: String, bg: Color, k: Float, key: 
         Modifier.size((28 * k).dp).control(key).clip(CircleShape).background(bg).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { Icon(icon, desc, tint = Color.White, modifier = Modifier.size((15 * k).dp)) }
+}
+
+/** Small text pill button (top-right terminal tab, and anywhere a round icon does not read). */
+@Composable
+private fun PillBtn(text: String, bg: Color, fg: Color, k: Float, key: String, onClick: () -> Unit) {
+    Box(
+        Modifier.control(key).clip(RoundedCornerShape(50)).background(bg).clickable(onClick = onClick)
+            .padding(horizontal = (10 * k).dp, vertical = (5 * k).dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(text, color = fg, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold) }
+}
+
+/** What the floating window shows: the background screen, or the terminal log. */
+private enum class TermTab { SCREEN, TERMINAL }
+
+/**
+ * The terminal page of the floating window (Fluid Cloud): every `vscreen shell` run and every command typed here,
+ * in full — command, stdout, stderr, exit code — newest at the bottom, with a command line of its own.
+ *
+ * The log area is registered as a control, so dragging there scrolls the log instead of injecting into the screen;
+ * the window is still moved by its title pill. The input row sits above the bottom pills (Stop / Hand back /
+ * Take over), which stay visible and tappable.
+ */
+@Composable
+private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>, onRun: (String) -> Unit) {
+    var cmd by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    // Auto-scroll to the bottom on new output, but only when the user was already near the bottom (reading old
+    // output must not be yanked away).
+    LaunchedEffect(entries.size) {
+        if (entries.isEmpty()) return@LaunchedEffect
+        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
+        if (last == null || last >= entries.size - 2) listState.scrollToItem(entries.size - 1)
+    }
+    Column(
+        Modifier.fillMaxSize().background(Color(0xFF0B0D14))
+            .padding(start = (10 * k).dp, end = (10 * k).dp, top = (46 * k).dp, bottom = (44 * k).dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(tr("终端", "Terminal"), color = Color.White, fontSize = (12 * k).sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width((6 * k).dp))
+            Text(tr("Shizuku · uid 2000", "Shizuku · uid 2000"), color = Color(0x88FFFFFF), fontSize = (10 * k).sp)
+            Spacer(Modifier.weight(1f))
+            Text(tr("清空", "Clear"), color = Color(0xFF7CC8FF), fontSize = (11 * k).sp,
+                modifier = Modifier.control("termClear").clip(RoundedCornerShape(50)).background(Color(0x22FFFFFF))
+                    .clickable { VScreenTerminal.clear() }.padding(horizontal = (8 * k).dp, vertical = (3 * k).dp))
+        }
+        Spacer(Modifier.height((6 * k).dp))
+        if (entries.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(tr("还没有跑过命令\n用 vscreen shell 跑，或在下面输入", "No commands run yet\nrun one with vscreen shell, or type below"),
+                    color = Color(0x88FFFFFF), fontSize = (11 * k).sp, lineHeight = (15 * k).sp)
+            }
+        } else {
+            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().control("termLog")) {
+                items(entries, key = { it.id }) { e -> TerminalEntryView(e, k) }
+            }
+        }
+        Spacer(Modifier.height((6 * k).dp))
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF1B1E2A))
+                .padding(start = (10 * k).dp, end = (4 * k).dp, top = (4 * k).dp, bottom = (4 * k).dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("$", color = Color(0xFF7CC8FF), fontSize = (13 * k).sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width((6 * k).dp))
+            Box(Modifier.weight(1f)) {
+                if (cmd.isEmpty()) Text(tr("输入 shell 命令", "Type a shell command"), color = Color(0x88FFFFFF), fontSize = (12 * k).sp)
+                BasicTextField(cmd, { cmd = it }, Modifier.fillMaxWidth().control("termInput"), singleLine = true,
+                    textStyle = TextStyle(color = Color.White, fontSize = (12 * k).sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Palette.standby),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = {
+                        val c = cmd.trim()
+                        if (c.isNotEmpty()) { cmd = ""; onRun(c) }
+                    }))
+            }
+            Text(tr("运行", "Run"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.control("termRun").clip(RoundedCornerShape(50)).background(Palette.brandA)
+                    .clickable {
+                        val c = cmd.trim()
+                        if (c.isNotEmpty()) { cmd = ""; onRun(c) }
+                    }.padding(horizontal = (10 * k).dp, vertical = (5 * k).dp))
+        }
+    }
+}
+
+/** One terminal record: full text, nothing cut off (no maxLines anywhere). */
+@Composable
+private fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float) {
+    Column(Modifier.fillMaxWidth().padding(vertical = (4 * k).dp)) {
+        Text("$ " + e.command, color = Color(0xFF7CC8FF), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
+        if (e.stdout.isNotEmpty()) Text(e.stdout.trimEnd('\n'), color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
+        if (e.stderr.isNotEmpty()) Text(e.stderr.trimEnd('\n'), color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
+        if (e.exitCode != 0) Text(
+            if (e.timedOut) tr("⏱ 超时，已终止（退出码 124，用时 ${e.durationMs}ms）", "⏱ timed out, killed (exit 124, ${e.durationMs} ms)")
+            else tr("退出码 ${e.exitCode}（用时 ${e.durationMs}ms）", "exit ${e.exitCode} (${e.durationMs} ms)"),
+            color = Color(0xFFFFB347), fontSize = (10 * k).sp)
+        Box(Modifier.fillMaxWidth().padding(top = (4 * k).dp).height(1.dp).background(Color(0x22FFFFFF)))
+    }
 }
 
 /**

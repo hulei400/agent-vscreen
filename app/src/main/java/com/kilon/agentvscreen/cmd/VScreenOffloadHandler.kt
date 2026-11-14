@@ -27,7 +27,8 @@ import java.util.concurrent.locks.ReentrantLock
  *
  * Files: VScreenAct (act, launch), VScreenSteps (the step language), VScreenReport (the four blocks),
  * VScreenOpenCommands (launch internals, handoff, stop, release), VScreenNotes (note, keep),
- * VScreenHelpers (spots, zoom, collect), VScreenScreenCommands (status, apps, fix), Tasks (--async, task), VScreenDiag.
+ * VScreenHelpers (spots, zoom, collect), VScreenScreenCommands (status, apps, fix), Tasks (--async, task), VScreenDiag,
+ * VScreenTerminalCommands (shell).
  */
 class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandler {
 
@@ -47,7 +48,7 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
         internal val lastElements = HashMap<String, ElSet>()
 
         /** Commands that do not read the app on the screen themselves (act and launch check the app rules per step). */
-        internal val RULE_FREE = setOf("status", "apps", "release", "stop", "fix", "help", "handoff", "note", "keep", "launch", "act", "events", "done", "title", "task", "diag")
+        internal val RULE_FREE = setOf("status", "apps", "release", "stop", "fix", "help", "handoff", "note", "keep", "launch", "act", "events", "done", "title", "task", "diag", "shell")
 
         /**
          * 1.2: the screen queue. There is one background screen; commands that work on it run one at a time, in the
@@ -222,6 +223,7 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
         "collect" -> collectCmd(sid, args)
         "fix" -> fix(sid, args)
         "diag" -> diagCmd(sid)
+        "shell" -> shellCmd(sid, args)
         else -> unknown(sub)
     }
 

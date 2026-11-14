@@ -193,6 +193,21 @@ internal object CommandSpec {
             listOf("导出一份诊断（版本、状态、最近的日志和被吞掉的异常；不含你输入的文字和截图），返回文本，出问题时交给开发者。"),
             listOf("export a diagnostic bundle (versions, status, recent logs and swallowed exceptions; none of your typed text or screenshots) as text, to hand to the developer when something is wrong."),
             scope = Scope.LOOK, screen = false),
+        Cmd("shell", "<命令>", "<command>",
+            listOf("在手机上跑一条 shell 命令（Shizuku，uid 2000，不是 root）：返回命令全文、stdout、stderr 和退出码；这次跑的也记进终端记录，悬浮窗的“终端”页能看到。",
+                "不要跑交互式的东西（它等命令自己结束）；超时默认 30 秒（--timeout 最长 120 秒，超时按 124 返回，已输出的部分还在）。",
+                "不带命令 = 列出最近的终端记录；--history 只列跑过的命令；--clear 清空记录。",
+                "例：shell \"ls /data/local/tmp\"、shell \"dumpsys battery | grep level\" --timeout 10s"),
+            listOf("run a shell command on the phone (Shizuku, uid 2000, not root): returns the full command, stdout, stderr and exit code; the run is also kept in the terminal log, visible on the floating window's Terminal page.",
+                "Do not run anything interactive (it waits for the command to finish by itself); default timeout 30 s (--timeout, at most 120 s; a timeout returns 124 with the output so far).",
+                "No command = list the recent terminal log; --history lists only the commands run; --clear clears the log.",
+                "e.g. shell \"ls /data/local/tmp\", shell \"dumpsys battery | grep level\" --timeout 10s"),
+            listOf(Opt("timeout", Kind.DURATION, "时长", "duration", "最多等多久（默认 30 秒，最长 120 秒）", "how long to wait at most (default 30 s, at most 120 s)"),
+                Opt("clear", Kind.SWITCH, null, null, "清空终端记录", "clear the terminal log"),
+                Opt("history", Kind.SWITCH, null, null, "只列出跑过的命令", "list only the commands run")),
+            scope = Scope.SYSTEM, screen = false,
+            sumZh = "跑一条 shell 命令（Shizuku），结果进终端记录、悬浮窗可见",
+            sumEn = "run a shell command (Shizuku); the result is kept in the terminal log, visible on the floating window"),
     )
 
     private val byName: Map<String, Cmd> = commands.associateBy { it.name }
