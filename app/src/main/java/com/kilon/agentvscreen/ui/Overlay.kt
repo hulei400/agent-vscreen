@@ -846,6 +846,20 @@ private fun Modifier.scrollControl(key: String): Modifier {
     return this.onGloballyPositioned { c -> val b = c.boundsInRoot(); Overlay.scrollControls[key] = RectF(b.left, b.top, b.right, b.bottom) }
 }
 
+/** The floating window's title pill — and the fullscreen page's second line: the
+ * agent's current step (`vscreen title`) when set, else the mode word. One
+ * function, so both places always show the same text. [left] is the ms left in
+ * this turn (the standby countdown); -1 when there is none. */
+internal fun agentTitleText(s: BackgroundOperation.State, left: Long): String {
+    val mode = modeOf(s)
+    return s.agentTitle ?: when (mode) {
+        Mode.ACTING -> s.action?.take(18) ?: Palette.word(mode)
+        Mode.STANDBY -> if (left >= 0) tr("AI 待命", "AI on standby") + " · ${left / 60000}:${"%02d".format((left / 1000) % 60)}" else Palette.word(mode)
+        Mode.IDLE -> if (s.powerSaving) tr("空闲 · 省电暂停", "Idle · paused to save power") else tr("空闲", "Idle")
+        else -> Palette.word(mode)
+    }
+}
+
 @Composable
 internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (@Composable (String) -> Unit)? = null) {
     val live by BackgroundOperation.state.collectAsState()
@@ -884,12 +898,8 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     LaunchedEffect(mode, tab) {
         if (mode != Mode.TAKEOVER || tab != TermTab.SCREEN) Overlay.closeImeBridge()
     }
-    val title = s.agentTitle ?: when (mode) {
-        Mode.ACTING -> s.action?.take(18) ?: Palette.word(mode)
-        Mode.STANDBY -> if (left >= 0) tr("AI 待命", "AI on standby") + " · ${left / 60000}:${"%02d".format((left / 1000) % 60)}" else Palette.word(mode)
-        Mode.IDLE -> if (s.powerSaving) tr("空闲 · 省电暂停", "Idle · paused to save power") else tr("空闲", "Idle")
-        else -> Palette.word(mode)
-    }
+    // Same text as the fullscreen page's second line (agentTitleText).
+    val title = agentTitleText(s, left)
 
     Box(Modifier.padding(PAD)) {
         Box(Modifier.width(w).height(h).glowBorder(mode, corner, pad = PAD - 1.dp)) {
