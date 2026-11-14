@@ -11,8 +11,10 @@ import kotlinx.coroutines.flow.asStateFlow
  * （[VScreenShell.run] → ShizukuManager.runProcess）。[run] 会等命令自己
  * 结束，不要在主线程调。
  *
- * 记录只在内存里（进程死了就没了）；悬浮窗的“终端”页（流体云）直接读
- * [log]：命令全文、stdout、stderr 都不截断。单条输出超过上限时才留
+ * 记录分两份：内存里的 [log] 只留最近 50 条、进程死了就没了，悬浮窗的
+ * “终端”页读它；另外 [VScreenTerminalHistory] 把每条跑完的命令持久存到
+ * 应用内部存储（最近 200 条，重启后还在），全屏页的“历史命令”读它。
+ * 命令全文、stdout、stderr 都不截断。单条输出超过上限时才留
  * 前面一部分并注明——那是防内存炸掉的安全阀，正常命令碰不到。
  */
 object VScreenTerminal {
@@ -67,6 +69,7 @@ object VScreenTerminal {
             _log.value = (_log.value + e).takeLast(MAX_ENTRIES)
             e
         }
+        runCatching { VScreenTerminalHistory.append(entry) }
         return entry
     }
 
@@ -76,6 +79,7 @@ object VScreenTerminal {
 
     fun clear() {
         synchronized(lock) { _log.value = emptyList() }
+        runCatching { VScreenTerminalHistory.clear() }
     }
 
     /** 跑过的命令（最近的在前，相邻重复的只留一次）。 */

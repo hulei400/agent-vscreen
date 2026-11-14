@@ -90,6 +90,7 @@ class HostService : Service() {
         BackgroundOperation.setEnabled(true)
         server = ApiServer(applicationContext).also { it.onChange = { renotify() }; it.start(ApiConfig.port) }
         Overlay.attach(applicationContext)
+        com.kilon.agentvscreen.core.VScreenTerminalHistory.init(applicationContext)
         Presence.start(applicationContext)
         A11yHeal.maybeHeal(applicationContext, "service start")
         Tailnet.sync(applicationContext)

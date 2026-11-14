@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloseFullscreen
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -87,6 +89,7 @@ import com.kilon.agentvscreen.api.Turns
 import com.kilon.agentvscreen.core.BackgroundOperation
 import com.kilon.agentvscreen.core.VScreenHandoff
 import com.kilon.agentvscreen.core.VScreenShell
+import com.kilon.agentvscreen.core.VScreenTerminalHistory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -106,6 +109,8 @@ class FullscreenActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 历史命令存在文件里；服务一般已经初始化过，这里再调一次是防万一（幂等）。
+        VScreenTerminalHistory.init(applicationContext)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -135,6 +140,7 @@ class FullscreenActivity : ComponentActivity() {
         var holdAt by remember { mutableStateOf(Offset.Zero) }
         var hintAt by remember { mutableLongStateOf(0L) }
         var appLabel by remember { mutableStateOf<String?>(null) }
+        var showHistory by remember { mutableStateOf(false) }
         var left by remember { mutableLongStateOf(-1L) }
         LaunchedEffect(s.displayId, s.operating) {
             val id = s.displayId ?: return@LaunchedEffect
@@ -263,8 +269,11 @@ class FullscreenActivity : ComponentActivity() {
                         Circle(Icons.AutoMirrored.Filled.Send, tr("发送", "Send"), Palette.brandA) { send() }
                     }
                 }
-                Row(Modifier.clip(RoundedCornerShape(30.dp)).background(Color(0xE612141C)).padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 底部药丸条：窄屏上三个按钮放不下就自动换行，不裁掉。
+                FlowRow(Modifier.clip(RoundedCornerShape(30.dp)).background(Color(0xE612141C)).padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    itemVerticalAlignment = Alignment.CenterVertically) {
                     if (takenOver) {
                         Circle(Icons.AutoMirrored.Filled.ArrowBack, tr("返回", "Back"), Color(0x22FFFFFF)) { vscreenUserInput(session) { VScreenShell.key(it, "back") } }
                         Circle(Icons.Filled.Keyboard, tr("打字", "Type"), if (typing) Palette.brandA else Color(0x22FFFFFF)) { typing = !typing }
@@ -282,9 +291,13 @@ class FullscreenActivity : ComponentActivity() {
                                 toast(msg); if (ok) runOnUiThread { finish() }
                             }.start()
                         }
+                        Pill(tr("历史命令", "History"), Icons.Filled.History, Color(0x22FFFFFF), Color.White) { showHistory = true }
                     }
                 }
             }
+
+            // 历史命令页：盖在画面和底栏上面，关掉就回到全屏。
+            if (showHistory) TerminalHistoryPage(onClose = { showHistory = false })
         }
     }
 
