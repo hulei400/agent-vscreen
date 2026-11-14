@@ -124,10 +124,9 @@ class FullscreenActivity : ComponentActivity() {
         setContent {
             AvsTheme {
                 val s by BackgroundOperation.state.collectAsState()
-                val session = s.ownerSessionId
-                // No background screen yet is fine: the page shows the terminal and its history,
-                // and picks the screen up when an app is launched later.
-                if (session != null) FullScreen(session)
+                // No background screen and no session yet is fine: the page shows the terminal
+                // and its history, and picks the screen up when an app is launched later.
+                FullScreen(s.ownerSessionId)
             }
         }
     }
@@ -135,7 +134,7 @@ class FullscreenActivity : ComponentActivity() {
     private fun toast(msg: String) = runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
 
     @Composable
-    private fun FullScreen(session: String) {
+    private fun FullScreen(session: String?) {
         val s by BackgroundOperation.state.collectAsState()
         val mode = modeOf(s)
         val takenOver = mode == Mode.TAKEOVER
@@ -157,13 +156,13 @@ class FullscreenActivity : ComponentActivity() {
                 }
             }
         }
-        LaunchedEffect(session) { while (true) { left = Turns.leftMs(session) ?: -1L; delay(1000) } }
+        LaunchedEffect(session) { val sid = session ?: return@LaunchedEffect; while (true) { left = Turns.leftMs(sid) ?: -1L; delay(1000) } }
         LaunchedEffect(takenOver) { if (!takenOver) typing = false }
 
         Box(Modifier.fillMaxSize().background(Color(0xFF07080D))) {
             // The picture, fitted, with its border — or the terminal when there is no
             // background screen yet (the screen is picked up when an app is launched).
-            if (s.displayId != null) {
+            if (s.displayId != null && session != null) {
             BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(top = 56.dp, bottom = if (typing) 140.dp else 96.dp, start = 14.dp, end = 14.dp),
                 contentAlignment = Alignment.Center) {
                 val aspect = Overlay.aspect()
@@ -247,7 +246,7 @@ class FullscreenActivity : ComponentActivity() {
                     // "Close screen" only makes sense once there is a screen; with none, the
                     // left "exit full screen" button is the way out.
                     else -> {
-                        if (s.displayId != null) Circle(Icons.Filled.Close, tr("关闭副屏", "Close screen"), Color(0x33FFFFFF)) {
+                        if (s.displayId != null && session != null) Circle(Icons.Filled.Close, tr("关闭副屏", "Close screen"), Color(0x33FFFFFF)) {
                             BackgroundOperation.releaseNow(session); finish()
                         }
                     }
@@ -301,7 +300,7 @@ class FullscreenActivity : ComponentActivity() {
                         if (mode == Mode.STOPPED) Pill(tr("交还 AI", "Hand back"), Icons.Filled.SmartToy, Palette.takeover, Color(0xFF052E1C)) { BackgroundOperation.userResume() }
                         // Take over / move to the main screen need a background screen; history
                         // works without one.
-                        if (s.displayId != null) {
+                        if (s.displayId != null && session != null) {
                             Pill(tr("接管", "Take over"), Icons.Filled.TouchApp, Color(0x22FFFFFF), Color.White) {
                                 if (s.userStopped) BackgroundOperation.userResume()
                                 BackgroundOperation.beginTakeover(session)
@@ -387,7 +386,8 @@ private fun Pill(label: String, icon: ImageVector, bg: Color, fg: Color, onClick
 }
 
 /** Runs [op] with the display id off the main thread, only while [sessionId] holds the screen (接管). */
-internal fun vscreenUserInput(sessionId: String, op: (Int) -> Unit) {
+internal fun vscreenUserInput(sessionId: String?, op: (Int) -> Unit) {
+    if (sessionId == null) return
     val s = BackgroundOperation.state.value
     val id = s.displayId ?: return
     if (s.takeoverSessionId != sessionId) return
