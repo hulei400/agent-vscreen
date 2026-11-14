@@ -75,21 +75,68 @@ object Setup {
         return out
     }
 
-    /** Add this app's read-only accessibility service to the enabled list, keeping every service already there. */
+    /** One attempt at turning the accessibility service on. */
+    private enum class A11yAttempt { CONNECTED, WRITE_FAILED, NOT_CONNECTED }
+
+    /** Add this app's read-only accessibility service to the enabled list, keeping every service already there.
+     *
+     * Borrowed from the virtual screen (lejw0925/android-virtual-screen, AccessibilityAuthorization): after
+     * writing, the list is read back to verify the system really took it; when the entry is already there but the
+     * service never connects — a stale binding left by an app update — the entry is first dropped, then re-added
+     * after ~150 ms to force the system to rebind; and a failed first attempt is retried once with a rebind.
+     * Only our own entry is ever touched; other services are left alone. */
     fun enableAccessibility(ctx: Context): Pair<Boolean, String> {
         val comp = "${ctx.packageName}/${VScreenAccessibilityService::class.java.name}"
-        val cur = VScreenShell.run(arrayOf("settings", "get", "secure", "enabled_accessibility_services")).stdout.trim()
-            .takeIf { it.isNotEmpty() && it != "null" }
-        val list = cur?.split(':')?.filter { it.isNotBlank() }.orEmpty()
-        val next = (list.filter { it != comp } + comp).joinToString(":")
-        val w = VScreenShell.run(arrayOf("settings", "put", "secure", "enabled_accessibility_services", next))
-        VScreenShell.run(arrayOf("settings", "put", "secure", "accessibility_enabled", "1"))
-        if (w.exitCode != 0) return false to tr("无障碍：写系统设置失败（${w.combined.take(80)}），请在 系统设置 › 无障碍 › Agent-VScreen 手动打开", "Accessibility: writing system settings failed (${w.combined.take(80)}); turn it on in Settings › Accessibility › Agent-VScreen")
-        val t0 = System.currentTimeMillis()
-        while (System.currentTimeMillis() - t0 < 4_000) {
-            if (VScreenAccessibilityService.getInstance() != null) return true to tr("无障碍已打开（其它无障碍服务保持不变）", "Accessibility turned on (other accessibility services unchanged)")
-            Thread.sleep(200)
+        val manual = tr("请在 系统设置 › 无障碍 › Agent-VScreen 手动打开一次", "turn it on once in Settings › Accessibility › Agent-VScreen")
+        // null when the read itself fails: never treat that as an empty list, or the write below would wipe
+        // every other service off the list.
+        fun readList(): List<String>? {
+            val r = VScreenShell.run(arrayOf("settings", "get", "secure", "enabled_accessibility_services"))
+            if (r.exitCode != 0) return null
+            val cur = r.stdout.trim().takeIf { it.isNotEmpty() && it != "null" }
+            return cur?.split(':')?.filter { it.isNotBlank() }.orEmpty()
         }
-        return false to tr("无障碍：已写入设置但 4 秒内没连上，部分系统会拦截，请在 系统设置 › 无障碍 › Agent-VScreen 手动打开一次", "Accessibility: the setting was written but did not connect within 4 s (some systems block it); turn it on once in Settings › Accessibility › Agent-VScreen")
+        fun writeList(list: List<String>): Boolean =
+            VScreenShell.run(arrayOf("settings", "put", "secure", "enabled_accessibility_services", list.joinToString(":"))).exitCode == 0
+        fun waitConnected(timeoutMs: Long): Boolean {
+            val t0 = System.currentTimeMillis()
+            while (System.currentTimeMillis() - t0 < timeoutMs) {
+                if (VScreenAccessibilityService.getInstance() != null) return true
+                Thread.sleep(200)
+            }
+            return false
+        }
+        // One attempt. rebind: drop our entry first (clears a stale binding left by an app update), wait ~150 ms,
+        // then add it back. Returns whether the service connected.
+        fun attempt(rebind: Boolean): A11yAttempt {
+            var list = readList() ?: return A11yAttempt.WRITE_FAILED
+            if (rebind && list.contains(comp)) {
+                if (!writeList(list.filter { it != comp })) return A11yAttempt.WRITE_FAILED
+                Thread.sleep(150)
+                list = readList() ?: return A11yAttempt.WRITE_FAILED
+            }
+            if (!list.contains(comp)) {
+                if (!writeList(list.filter { it != comp } + comp)) return A11yAttempt.WRITE_FAILED
+                if (VScreenShell.run(arrayOf("settings", "put", "secure", "accessibility_enabled", "1")).exitCode != 0)
+                    return A11yAttempt.WRITE_FAILED
+                // 读回来验：有些系统会静默拒绝，光看写命令的退出码不够。
+                if (readList()?.contains(comp) != true) return A11yAttempt.WRITE_FAILED
+            }
+            return if (waitConnected(4_000)) A11yAttempt.CONNECTED else A11yAttempt.NOT_CONNECTED
+        }
+
+        if (VScreenAccessibilityService.getInstance() != null)
+            return true to tr("无障碍已打开（其它无障碍服务保持不变）", "Accessibility turned on (other accessibility services unchanged)")
+        // 已在列表里却没连上：绑定是装新版后留下的旧的，第一遍就重新绑定。
+        val first = attempt(rebind = readList()?.contains(comp) == true)
+        if (first == A11yAttempt.CONNECTED)
+            return true to tr("无障碍已打开（其它无障碍服务保持不变）", "Accessibility turned on (other accessibility services unchanged)")
+        if (first == A11yAttempt.NOT_CONNECTED) {
+            // 一次没连上：带重新绑定再试一遍。
+            if (attempt(rebind = true) == A11yAttempt.CONNECTED)
+                return true to tr("无障碍已打开（其它无障碍服务保持不变）", "Accessibility turned on (other accessibility services unchanged)")
+            return false to tr("无障碍：已写入设置但两次都没连上（已试过重新绑定），部分系统会拦截，$manual", "Accessibility: the setting was written but it did not connect after two tries (rebind tried too; some systems block it); $manual")
+        }
+        return false to tr("无障碍：写系统设置失败，$manual", "Accessibility: writing system settings failed; $manual")
     }
 }

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Rect
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
+import com.kilon.agentvscreen.host.Setup
 import com.kilon.agentvscreen.host.VScreenAccessibilityService
 import com.kilon.agentvscreen.cmd.NativeOffloadResult
 import com.kilon.agentvscreen.core.BackgroundOperation
@@ -256,17 +257,10 @@ internal fun VScreenOffloadHandler.fixOne(sid: String?, code: String, args: Offl
         "no_accessibility" -> {
             if (a11yLive()) return true to tr("无障碍服务已连接", "the accessibility service is connected")
             if (s.privilege.name != "READY") return false to tr("需要先修好 Shizuku（fix no_privilege），或请用户在 系统设置 › 无障碍 › 已安装的应用 › Agent-VScreen 手动打开", "Fix Shizuku first (fix no_privilege), or ask the user to turn it on in Settings › Accessibility › Installed apps › Agent-VScreen")
-            val comp = "${context.packageName}/$A11Y_SERVICE"
-            val cur = VScreenShell.run(arrayOf("settings", "get", "secure", "enabled_accessibility_services")).stdout.trim()
-                .takeIf { it.isNotEmpty() && it != "null" }
-            val list = cur?.split(':')?.filter { it.isNotBlank() }.orEmpty()
-            val next = (list.filter { it != comp } + comp).joinToString(":")
-            // Re-writing the list (ours removed then added) also re-binds a crashed service.
-            val w = VScreenShell.run(arrayOf("settings", "put", "secure", "enabled_accessibility_services", next))
-            VScreenShell.run(arrayOf("settings", "put", "secure", "accessibility_enabled", "1"))
-            if (w.exitCode != 0) return false to tr("写入系统设置失败（${w.combined.take(120)}）；请用户在 系统设置 › 无障碍 里手动打开 Agent-VScreen", "Writing system settings failed (${w.combined.take(120)}); ask the user to turn on Agent-VScreen in Settings › Accessibility")
-            if (a11yLive(4_000)) true to tr("已通过 Shizuku 打开 Agent-VScreen 的无障碍服务", "Turned on Agent-VScreen's accessibility service via Shizuku")
-            else false to tr("已写入设置，但服务 4 秒内没有连上：部分系统（荣耀/华为）会拦截，请用户在 系统设置 › 无障碍 里手动打开一次", "The setting was written but the service did not connect within 4 s: some systems (Honor/Huawei) block it; ask the user to turn it on once in Settings › Accessibility")
+            // Setup.enableAccessibility 才是正路：写完读回来验、装新版后留下的旧绑定先删再加、连不上再试一遍。
+            val (ok, msg) = Setup.enableAccessibility(context)
+            if (ok) true to tr("已通过 Shizuku 打开 Agent-VScreen 的无障碍服务", "Turned on Agent-VScreen's accessibility service via Shizuku")
+            else false to msg
         }
         "accessibility_cannot_see_display", "a11y_not_ready" -> {
             val d = BackgroundOperation.previewDisplayFor(sid ?: "") ?: return false to tr("当前没有副屏", "there is no screen right now")
