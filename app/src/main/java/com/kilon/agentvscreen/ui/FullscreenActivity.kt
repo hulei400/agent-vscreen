@@ -18,6 +18,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -89,6 +92,7 @@ import com.kilon.agentvscreen.api.Turns
 import com.kilon.agentvscreen.core.BackgroundOperation
 import com.kilon.agentvscreen.core.VScreenHandoff
 import com.kilon.agentvscreen.core.VScreenShell
+import com.kilon.agentvscreen.core.VScreenTerminal
 import com.kilon.agentvscreen.core.VScreenTerminalHistory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -121,7 +125,8 @@ class FullscreenActivity : ComponentActivity() {
             AvsTheme {
                 val s by BackgroundOperation.state.collectAsState()
                 val session = s.ownerSessionId
-                LaunchedEffect(session, s.displayId) { if (session == null || s.displayId == null) finish() }
+                // No background screen yet is fine: the page shows the terminal and its history,
+                // and picks the screen up when an app is launched later.
                 if (session != null) FullScreen(session)
             }
         }
@@ -142,6 +147,8 @@ class FullscreenActivity : ComponentActivity() {
         var appLabel by remember { mutableStateOf<String?>(null) }
         var showHistory by remember { mutableStateOf(false) }
         var left by remember { mutableLongStateOf(-1L) }
+        // The terminal log, for the no-screen state (and kept warm for a late screen).
+        val termLog by VScreenTerminal.log.collectAsState()
         LaunchedEffect(s.displayId, s.operating) {
             val id = s.displayId ?: return@LaunchedEffect
             appLabel = withContext(Dispatchers.IO) {
@@ -154,7 +161,9 @@ class FullscreenActivity : ComponentActivity() {
         LaunchedEffect(takenOver) { if (!takenOver) typing = false }
 
         Box(Modifier.fillMaxSize().background(Color(0xFF07080D))) {
-            // The picture, fitted, with its border.
+            // The picture, fitted, with its border — or the terminal when there is no
+            // background screen yet (the screen is picked up when an app is launched).
+            if (s.displayId != null) {
             BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(top = 56.dp, bottom = if (typing) 140.dp else 96.dp, start = 14.dp, end = 14.dp),
                 contentAlignment = Alignment.Center) {
                 val aspect = Overlay.aspect()
@@ -212,13 +221,18 @@ class FullscreenActivity : ComponentActivity() {
                     }
                 }
             }
+            } else {
+                Box(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(top = 56.dp, bottom = 96.dp, start = 14.dp, end = 14.dp)) {
+                    FullscreenTerminalView(termLog)
+                }
+            }
 
             // Top bar.
             Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Circle(Icons.Filled.CloseFullscreen, tr("退出全屏", "Exit full screen"), Color(0x33FFFFFF)) { finish() }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(appLabel ?: tr("后台副屏", "Background screen"), color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(appLabel ?: if (s.displayId == null) tr("终端", "Terminal") else tr("后台副屏", "Background screen"), color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(7.dp).clip(CircleShape).background(if (mode == Mode.ACTING) Brush.sweepGradient(Palette.rainbow) else SolidColor(Palette.of(mode))))
                         Spacer(Modifier.width(5.dp))
@@ -230,8 +244,12 @@ class FullscreenActivity : ComponentActivity() {
                 }
                 when (mode) {
                     Mode.ACTING, Mode.STANDBY -> Pill(tr("停止 AI", "Stop AI"), Icons.Filled.Stop, Palette.stopped, Color.White) { BackgroundOperation.userStop() }
-                    else -> Circle(Icons.Filled.Close, tr("关闭副屏", "Close screen"), Color(0x33FFFFFF)) {
-                        BackgroundOperation.releaseNow(session); finish()
+                    // "Close screen" only makes sense once there is a screen; with none, the
+                    // left "exit full screen" button is the way out.
+                    else -> {
+                        if (s.displayId != null) Circle(Icons.Filled.Close, tr("关闭副屏", "Close screen"), Color(0x33FFFFFF)) {
+                            BackgroundOperation.releaseNow(session); finish()
+                        }
                     }
                 }
             }
@@ -281,15 +299,19 @@ class FullscreenActivity : ComponentActivity() {
                         Pill(tr("交还 AI", "Hand back"), Icons.Filled.SmartToy, Palette.takeover, Color(0xFF052E1C)) { BackgroundOperation.userResume() }
                     } else {
                         if (mode == Mode.STOPPED) Pill(tr("交还 AI", "Hand back"), Icons.Filled.SmartToy, Palette.takeover, Color(0xFF052E1C)) { BackgroundOperation.userResume() }
-                        Pill(tr("接管", "Take over"), Icons.Filled.TouchApp, Color(0x22FFFFFF), Color.White) {
-                            if (s.userStopped) BackgroundOperation.userResume()
-                            BackgroundOperation.beginTakeover(session)
-                        }
-                        Pill(tr("移到主屏", "Move to main screen"), Icons.Filled.PhoneAndroid, Color(0x22FFFFFF), Color.White) {
-                            Thread {
-                                val (ok, msg) = runCatching { VScreenHandoff.userToMain(session) }.getOrElse { false to (it.message ?: tr("失败", "failed")) }
-                                toast(msg); if (ok) runOnUiThread { finish() }
-                            }.start()
+                        // Take over / move to the main screen need a background screen; history
+                        // works without one.
+                        if (s.displayId != null) {
+                            Pill(tr("接管", "Take over"), Icons.Filled.TouchApp, Color(0x22FFFFFF), Color.White) {
+                                if (s.userStopped) BackgroundOperation.userResume()
+                                BackgroundOperation.beginTakeover(session)
+                            }
+                            Pill(tr("移到主屏", "Move to main screen"), Icons.Filled.PhoneAndroid, Color(0x22FFFFFF), Color.White) {
+                                Thread {
+                                    val (ok, msg) = runCatching { VScreenHandoff.userToMain(session) }.getOrElse { false to (it.message ?: tr("失败", "failed")) }
+                                    toast(msg); if (ok) runOnUiThread { finish() }
+                                }.start()
+                            }
                         }
                         Pill(tr("历史命令", "History"), Icons.Filled.History, Color(0x22FFFFFF), Color.White) { showHistory = true }
                     }
@@ -300,12 +322,52 @@ class FullscreenActivity : ComponentActivity() {
             if (showHistory) TerminalHistoryPage(onClose = { showHistory = false })
         }
     }
+}
+
+/**
+ * The terminal log, full screen, when there is no background screen yet. Same records as the
+ * floating window's terminal page (long-press a command to copy it, "清空" clears them); the
+ * history page covers everything that survived a restart.
+ */
+@Composable
+private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
+    val listState = rememberLazyListState()
+    // Auto-scroll to the bottom on new output, but only when the user was already near the bottom.
+    LaunchedEffect(entries.size) {
+        if (entries.isEmpty()) return@LaunchedEffect
+        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
+        if (last == null || last >= entries.size - 2) listState.scrollToItem(entries.size - 1)
+    }
+    Column(Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color(0xFF0B0D14)).padding(horizontal = 14.dp, top = 12.dp, bottom = 12.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(tr("终端", "Terminal"), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(6.dp))
+            Text(tr("KernelSU root · uid 0", "KernelSU root · uid 0"), color = Color(0x88FFFFFF), fontSize = 12.sp)
+            Spacer(Modifier.width(6.dp))
+            Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = 12.sp)
+            Spacer(Modifier.weight(1f))
+            Text(tr("清空", "Clear"), color = Color(0xFF7CC8FF), fontSize = 13.sp,
+                modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x22FFFFFF))
+                    .clickable { VScreenTerminal.clear() }.padding(horizontal = 10.dp, vertical = 4.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+        if (entries.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(tr("还没有跑过命令\n用 vscreen shell 跑", "No commands run yet\nrun one with vscreen shell"),
+                    color = Color(0x88FFFFFF), fontSize = 14.sp, lineHeight = 20.sp)
+            }
+        } else {
+            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                items(entries, key = { it.id }) { e -> TerminalEntryView(e, 1f) }
+            }
+        }
+    }
+}
 
     private fun androidx.compose.ui.input.pointer.PointerInputScope.map(p: Offset, w: Float, h: Float): Pair<Int, Int>? {
         val r = android.graphics.RectF(0f, 0f, w, h)
         return pictureToScreen(p.x.coerceIn(0f, w - 1), p.y.coerceIn(0f, h - 1), r)
     }
-}
 
 @Composable
 private fun Circle(icon: ImageVector, desc: String, bg: Color, onClick: () -> Unit) {
