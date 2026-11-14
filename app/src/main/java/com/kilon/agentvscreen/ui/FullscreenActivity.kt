@@ -13,6 +13,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -215,8 +216,10 @@ class FullscreenActivity : ComponentActivity() {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(7.dp).clip(CircleShape).background(if (mode == Mode.ACTING) Brush.sweepGradient(Palette.rainbow) else SolidColor(Palette.of(mode))))
                         Spacer(Modifier.width(5.dp))
-                        val word = s.agentTitle ?: (Palette.word(mode) + if (mode == Mode.STANDBY && left >= 0) (" · " + tr("${left / 60000}:${"%02d".format((left / 1000) % 60)} 后省电", "power save in ${left / 60000}:${"%02d".format((left / 1000) % 60)}")) else "")
-                        Text(word, color = Color(0xCCFFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // Same text as the floating window's title pill (the agent's
+                        // current step when set); long text scrolls sideways, like there.
+                        val word = agentTitleText(s, left)
+                        Text(word, Modifier.weight(1f, fill = false).basicMarquee(initialDelayMillis = 1000, velocity = 30.dp), color = Color(0xCCFFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Visible)
                     }
                 }
                 when (mode) {
