@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * 命令以 root（uid 0）跑：每次单独起 `su -c`（KernelSU），不走 Shizuku，
  * 和虚拟屏里别的操作不是同一条路。第一次跑时手机可能弹一次 KernelSU
  * 的 root 授权，点允许就行。[run] 会等命令自己结束，不要在主线程调。
+ * 每条命令跑之前都会弹一次浮窗（终端页），让用户看得到在干嘛——就算
+ * 没有副屏、就算用户刚用 × 关了浮窗，下一条命令来了一样弹出来。
  *
  * 记录分两份：内存里的 [log] 只留最近 50 条、进程死了就没了，悬浮窗的
  * “终端”页读它；另外 [VScreenTerminalHistory] 把每条跑完的命令持久存到
@@ -116,6 +118,9 @@ object VScreenTerminal {
 
     /** 跑一条命令，记进 [log]，返回这条记录。不要在主线程调。 */
     fun run(command: String, timeoutMs: Long = DEFAULT_TIMEOUT_MS): Entry {
+        // Pop the floating window up on the terminal page so the user can see the command run — even
+        // with no screen and even after they closed the window with × (the next command pops it again).
+        BackgroundOperation.popTerminalWindow()
         val t0 = System.currentTimeMillis()
         val r = runCatching { executor(command, timeoutMs.coerceIn(1_000L, MAX_TIMEOUT_MS)) }
             .getOrElse { ShellResult(1, "", "terminal: ${it.javaClass.simpleName}: ${it.message}") }

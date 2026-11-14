@@ -106,6 +106,14 @@ object BackgroundOperation {
          * from the notification (显示小窗).
          */
         val windowHidden: Boolean = false,
+        /**
+         * A shell command ran and wants the floating window up on the terminal page, even with no screen
+         * (no display) and even after the user closed the window with ×. Set (with windowHidden = false)
+         * by [popTerminalWindow] on every `vscreen shell` run; cleared by [closeWindow] when the user
+         * closes the window. The overlay shows while this is set (and the preview is on), so a command
+         * pops the window even after the user closed it — the next command pops it again.
+         */
+        val terminalPopAt: Long = 0L,
         /** 1.1: what the agent says it is doing (`vscreen title`), shown on the window's pill; cleared with the turn. */
         val agentTitle: String? = null,
     )
@@ -535,24 +543,44 @@ object BackgroundOperation {
      */
     fun closeWindow(): String {
         val s = _state.value
-        val owner = s.ownerSessionId ?: return tr("没有副屏", "No screen")
+        val owner = s.ownerSessionId
+        if (owner == null) {
+            // The terminal-only window (a shell command popped it up, no screen): × hides it until the
+            // next command pops it again.
+            if (s.terminalPopAt > 0L) {
+                _state.update { it.copy(windowHidden = true, terminalPopAt = 0L) }
+                return tr("小窗已收起", "Window hidden")
+            }
+            return tr("没有副屏", "No screen")
+        }
         val turnRunning = synchronized(lock) { owner in turns }
         if (s.userStopped || !turnRunning) {
             releaseScreen(if (s.userStopped) tr("你从悬浮窗关闭了副屏（AI 仍处于停止状态）", "You closed the screen from the floating window (the AI is still stopped)") else tr("你从悬浮窗关闭了副屏", "You closed the screen from the floating window"))
-            _state.update { it.copy(windowHidden = false) }
+            _state.update { it.copy(windowHidden = false, terminalPopAt = 0L) }
             return if (s.userStopped) tr("副屏已关闭。AI 仍是停止状态：要让它继续，在通知里点“允许继续”", "Screen closed. The AI is still stopped: to let it go on, tap \"Allow again\" in the notification") else tr("副屏已关闭", "Screen closed")
         }
         if (s.takeoverSessionId != null) {
             synchronized(lock) { tasks[owner]?.rereadRequired = true }
             _state.update { it.copy(takeoverSessionId = null) }
         }
-        _state.update { it.copy(windowHidden = true) }
+        _state.update { it.copy(windowHidden = true, terminalPopAt = 0L) }
         AppLogger.info(TAG, "window hidden by the user (AI keeps working)")
         return tr("小窗已收起，AI 继续在后台工作。通知栏的“显示小窗”可以再打开", "Window hidden; the AI keeps working in the background. \"Show window\" in the notification brings it back")
     }
 
     /** 1.1.6: bring the hidden window back (notification action, app home). */
     fun showWindow() { _state.update { it.copy(windowHidden = false) } }
+
+    /**
+     * A shell command ran: pop the floating window up on the terminal page so the user can see what the
+     * agent is doing, even with no screen (no display) and even after the user closed the window with × —
+     * the next command pops it again. Called from the terminal's run path (any thread; the overlay picks
+     * it up on Main and forces its tab to the terminal page). The preview toggle is still respected: if
+     * the user turned the floating window off, this does not force it back on.
+     */
+    fun popTerminalWindow() {
+        _state.update { it.copy(terminalPopAt = System.currentTimeMillis(), windowHidden = false) }
+    }
 
     /**
      * 1.1.6: one text for every USER_STOPPED refusal, so the agent can tell the user exactly when it happened and how to

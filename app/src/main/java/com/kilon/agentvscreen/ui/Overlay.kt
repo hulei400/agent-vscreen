@@ -188,7 +188,10 @@ object Overlay {
         ctx = c.applicationContext
         job?.cancel()
         job = scope.launch {
-            combine(BackgroundOperation.state.map { it.displayId != null && it.showPreview && !it.windowHidden }.distinctUntilChanged(), fullscreenOpen) { up, full -> up to full }
+            // The window is up while there is a screen, or while a shell command popped it up on the
+            // terminal page (no screen needed) — and not while the user hid it with ×, switched the
+            // preview off, or the full-screen page is in front.
+            combine(BackgroundOperation.state.map { it.showPreview && !it.windowHidden && (it.displayId != null || it.terminalPopAt > 0L) }.distinctUntilChanged(), fullscreenOpen) { up, full -> up to full }
                 .distinctUntilChanged().collect { (up, full) ->
                     AppLogger.info("Overlay", when { !up -> "no screen / preview off / closed by the user: hide"; full -> "full-screen page in front: hide"; else -> "screen up: show" })
                     if (up && !full) show() else hide()
@@ -199,7 +202,7 @@ object Overlay {
     fun detach() { job?.cancel(); job = null; hide() }
 
     /** Re-check after the overlay permission was granted. */
-    fun refresh() { val s = BackgroundOperation.state.value; if (s.displayId != null && s.showPreview && !s.windowHidden && !fullscreenOpen.value) show() }
+    fun refresh() { val s = BackgroundOperation.state.value; if (s.showPreview && !s.windowHidden && !fullscreenOpen.value && (s.displayId != null || s.terminalPopAt > 0L)) show() }
 
     /**
      * Let the window take keyboard focus (so the keyboard bridge's hidden sink can open the soft keyboard), or
@@ -864,7 +867,9 @@ internal fun agentTitleText(s: BackgroundOperation.State, left: Long): String {
 internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (@Composable (String) -> Unit)? = null) {
     val live by BackgroundOperation.state.collectAsState()
     val s = fixed ?: live
-    val owner = s.ownerSessionId ?: return
+    // No owner session (no screen): the window can still show the terminal page, popped up by a shell
+    // command. Everything that needs a screen (picture, takeover) is guarded below.
+    val owner = s.ownerSessionId
     val mode = modeOf(s)
     if (Overlay.docked.value) { DockTab(mode, Overlay.dockRight.value); return }
     val density = LocalDensity.current
@@ -877,7 +882,7 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
 
     var left by remember { mutableLongStateOf(-1L) }
     LaunchedEffect(owner, mode) {
-        while (true) { left = Turns.leftMs(owner) ?: -1L; delay(1000) }
+        while (true) { left = owner?.let { Turns.leftMs(it) } ?: -1L; delay(1000) }
     }
 
     // 流体云：画面 / 终端 切换。终端页是只读的（命令由 agent 跑，`vscreen shell`）；窗口的获焦只归输入法桥管
@@ -892,6 +897,16 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
         if (termLog.isEmpty()) return@LaunchedEffect
         if (tab != TermTab.SCREEN) return@LaunchedEffect
         if (!hasLiveScreenApp()) tab = TermTab.TERMINAL
+    }
+    // A shell command popped the window up (or the screen went away while it was up): the terminal page
+    // is the only one that makes sense — force the tab there and unfold the window if it was folded into
+    // its edge tab, so the user actually sees the command. A hand switch back to the picture tab is
+    // respected until the next command pops it again.
+    LaunchedEffect(s.terminalPopAt, owner) {
+        if (s.terminalPopAt > 0L || owner == null) {
+            tab = TermTab.TERMINAL
+            if (Overlay.docked.value) Overlay.undock()
+        }
     }
     val haptic = LocalHapticFeedback.current
     // The keyboard bridge closes when the user hands the screen back or leaves the screen tab.
@@ -909,7 +924,12 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             ) {
                 if (tab == TermTab.TERMINAL) {
                     TerminalView(k, termLog)
-                } else if (picture != null) picture(owner) else VScreenLiveFrame(owner, Modifier.fillMaxSize(), interactive = false)
+                } else if (owner != null) {
+                    if (picture != null) picture(owner) else VScreenLiveFrame(owner, Modifier.fillMaxSize(), interactive = false)
+                } else {
+                    // No screen and the picture tab was picked: nothing to show — fall back to the terminal.
+                    TerminalView(k, termLog)
+                }
                 // A soft scrim under the pill and buttons keeps them readable on white pages.
                 Box(Modifier.fillMaxWidth().height((44 * k).dp).background(Brush.verticalGradient(listOf(Color(0x99000000), Color.Transparent))))
             }
@@ -929,11 +949,14 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             }
 
             // Buttons, top right: terminal tab, full screen, close. Same places in every state.
+            // No screen: there is only the terminal page, so the tab toggle is hidden.
             Row(Modifier.align(Alignment.TopEnd).padding(end = (6 * k).dp, top = (6 * k).dp)) {
-                PillBtn(if (tab == TermTab.TERMINAL) tr("画面", "Screen") else tr("终端", "Terminal"), Color(0xCC12141C), Color.White, k, "termTab") {
-                    tab = if (tab == TermTab.TERMINAL) TermTab.SCREEN else TermTab.TERMINAL
+                if (owner != null) {
+                    PillBtn(if (tab == TermTab.TERMINAL) tr("画面", "Screen") else tr("终端", "Terminal"), Color(0xCC12141C), Color.White, k, "termTab") {
+                        tab = if (tab == TermTab.TERMINAL) TermTab.SCREEN else TermTab.TERMINAL
+                    }
+                    Spacer(Modifier.width((5 * k).dp))
                 }
-                Spacer(Modifier.width((5 * k).dp))
                 RoundBtn(Icons.Filled.OpenInFull, tr("全屏", "Full screen"), Color(0xCC12141C), k, "full") { Overlay.openFull() }
                 Spacer(Modifier.width((5 * k).dp))
                 RoundBtn(Icons.Filled.Close, if (mode == Mode.ACTING || mode == Mode.STANDBY || mode == Mode.TAKEOVER) tr("收起小窗", "Hide window") else tr("关闭副屏", "Close screen"),
@@ -975,7 +998,8 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             }
 
             // Take over at once (the explicit Fluid Cloud switch; the window is view-only by default), with a vibration.
-            if (mode != Mode.TAKEOVER && mode != Mode.STOPPED) {
+            // No screen: there is nothing to take over.
+            if (owner != null && mode != Mode.TAKEOVER && mode != Mode.STOPPED) {
                 Row(
                     Modifier.align(Alignment.BottomEnd).padding(end = (8 * k).dp, bottom = (8 * k).dp).control("takeover")
                         .clip(RoundedCornerShape(50)).background(Color(0xCC12141C)).clickable {
