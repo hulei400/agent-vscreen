@@ -1072,19 +1072,18 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
 
 /**
  * One terminal record: full text, nothing cut off (no maxLines anywhere). Long-press the command line to copy
- * the command (not the output) to the clipboard — a tap does nothing, so scrolling never copies by accident.
+ * the command (not the output) to the clipboard — combinedClickable's built-in long-press haptic gives one
+ * short buzz, and a "已复制" toast confirms; a tap does nothing, so scrolling never copies by accident.
  */
 @Composable
 private fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float) {
     val ctx = LocalContext.current
-    val haptic = LocalHapticFeedback.current
     Column(Modifier.fillMaxWidth().padding(vertical = (4 * k).dp)) {
         Text("$ " + e.command, color = Color(0xFF7CC8FF), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp,
             modifier = Modifier.clip(RoundedCornerShape(4.dp))
                 .combinedClickable(onClick = {}, onLongClick = {
                     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     cm?.setPrimaryClip(ClipData.newPlainText("command", e.command))
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     Toast.makeText(ctx, tr("已复制", "Copied"), Toast.LENGTH_SHORT).show()
                 })
                 .padding(vertical = (1 * k).dp))
