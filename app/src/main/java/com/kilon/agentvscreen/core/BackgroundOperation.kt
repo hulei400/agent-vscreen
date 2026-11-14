@@ -245,9 +245,27 @@ object BackgroundOperation {
         if (last == 0L) return
         if (SystemClock.elapsedRealtime() - last < STALE_FRAME_MS) return
         val tasks = VScreenShell.taskSource(d.displayId) ?: return
-        if (tasks.any { it.isAppTask }) return
-        AppLogger.info(TAG, "screen ${d.displayId} stopped drawing and has no app task left; releasing it")
-        VScreenHandoff.releaseEmptyScreen(owner, d.displayId)
+        val appTasks = tasks.filter { it.isAppTask }
+        if (appTasks.isEmpty()) {
+            AppLogger.info(TAG, "screen ${d.displayId} stopped drawing and has no app task left; releasing it")
+            VScreenHandoff.releaseEmptyScreen(owner, d.displayId)
+            return
+        }
+        // v30: a task moved to the main screen (tapped from Recents, or moved
+        // by move-stack) can still be listed on this screen for seconds — the
+        // system task list lags after a move, and releaseEmptyScreen's own
+        // re-check reads the same stale list, so the dead frame lingers. If
+        // every app task still listed here already sits on display 0, it has
+        // moved away: this screen is empty even though its own list is stale.
+        // TaskId comparison keeps dual instances apart — a second copy of the
+        // same app on the main screen has a different taskId and does not
+        // release this one.
+        val movedIds = appTasks.map { it.taskId }
+        val onMain = VScreenShell.taskSource(0)?.map { it.taskId }?.toSet()
+        if (onMain != null && movedIds.all { it in onMain }) {
+            AppLogger.info(TAG, "screen ${d.displayId} tasks $movedIds moved to the main screen; releasing it")
+            VScreenHandoff.releaseMovedScreen(owner, d.displayId, movedIds)
+        }
     }
 
     // ── v21: idle power saving ─────────────────────────────────────────────
