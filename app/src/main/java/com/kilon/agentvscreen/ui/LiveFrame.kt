@@ -56,6 +56,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -77,7 +78,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalViewConfiguration
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -85,10 +88,31 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.kilon.agentvscreen.R
+import com.kilon.agentvscreen.tr
 import com.kilon.agentvscreen.core.BackgroundOperation
 import com.kilon.agentvscreen.core.VScreenShell
 import kotlin.math.roundToInt
 
+
+/**
+ * True when the background screen is live right now: a display exists, it is not
+ * paused, and an app is running on it. The app lookup reads the display's cached
+ * task list — cheap — but it still runs off the main thread by convention.
+ */
+internal suspend fun hasLiveScreenApp(): Boolean {
+    val s = BackgroundOperation.state.value
+    val id = s.displayId ?: return false
+    if (s.idle || s.powerSaving) return false
+    return withContext(Dispatchers.IO) {
+        runCatching { VScreenShell.topActivity(id) != null }.getOrDefault(false)
+    }
+}
+
+/** What the picture tab says when there is no screen picture to show — no spinner. */
+internal fun noPictureText(): String = tr(
+    "还没有副屏画面：只跑命令时看“终端”页，开了应用这里才有画面",
+    "No screen picture yet — shell output is on the “Terminal” tab; open an app and it shows here",
+)
 
 /** [vscreen] The live picture of the background screen (floating window and full screen). */
 @Composable
@@ -107,7 +131,8 @@ fun VScreenLiveFrame(sessionId: String, modifier: Modifier = Modifier, interacti
     }
     if (display == null) {
         Box(modifier.background(Color(0xFFF2F2F7)), contentAlignment = Alignment.Center) {
-            Text(stringResource(R.string.vscreen_no_preview), fontSize = 11.sp, color = Color.Gray)
+            Text(noPictureText(), fontSize = 10.sp, color = Color.Gray, textAlign = TextAlign.Center,
+                lineHeight = 13.sp, modifier = Modifier.padding(horizontal = 14.dp))
         }
         return
     }
@@ -133,6 +158,14 @@ fun VScreenLiveFrame(sessionId: String, modifier: Modifier = Modifier, interacti
         value = blank && kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching { com.kilon.agentvscreen.core.VScreenShell.topActivity(display.displayId) == null }.getOrDefault(false)
         }
+    }.value
+    // Whether the picture tab has nothing to show at all: no display, a paused
+    // screen, or a screen with no app on it. A first frame is only ever
+    // "loading" on a live screen that is just starting; anything else is a
+    // steady state, and the tab says so instead of spinning forever. The fast
+    // path (no display / paused) is decided here; the app check is async.
+    val noPicture = androidx.compose.runtime.produceState(st.idle || st.powerSaving || display == null, display, st.idle, st.powerSaving) {
+        value = !hasLiveScreenApp()
     }.value
 
     Box(
@@ -182,6 +215,10 @@ fun VScreenLiveFrame(sessionId: String, modifier: Modifier = Modifier, interacti
             )
             if (blank) Text(stringResource(if (noApp) R.string.vscreen_no_app else R.string.vscreen_blank_frame), fontSize = 9.sp, color = Color.Gray,
                 modifier = Modifier.align(Alignment.BottomCenter).background(Color(0xCCFFFFFF)).padding(horizontal = 6.dp, vertical = 2.dp))
+        } else if (noPicture) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 14.dp)) {
+                Text(noPictureText(), fontSize = 10.sp, color = Color.Gray, textAlign = TextAlign.Center, lineHeight = 13.sp)
+            }
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
