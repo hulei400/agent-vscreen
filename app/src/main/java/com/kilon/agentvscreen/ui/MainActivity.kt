@@ -251,6 +251,10 @@ class MainActivity : ComponentActivity() {
                 Toggle(tr("空闲省电", "Idle power saving"), tr("一轮结束后暂停副屏渲染，页面保留，下一条命令自动恢复；个别应用恢复时会重新加载，遇到可以关掉", "Pauses rendering after a turn ends; the page is kept and the next command resumes it. A few apps reload on resume: turn this off if you see that"), idleSave) {
                     BackgroundOperation.setIdlePowerSave(it)
                 }
+                val screenOffKeep by com.kilon.agentvscreen.core.VScreenStore.screenOffKeep.collectAsState()
+                Toggle(tr("熄屏运行", "Keep the screen awake when the phone locks"), tr("手机锁屏后副屏也保持唤醒，任务不会停住；关掉则只靠唤醒重试（副屏睡了再唤醒，偶尔会卡住）", "Keeps the background screen awake while the phone is locked, so work does not stall. Off means wake-on-demand only (the screen may sleep and wake again; occasionally it can stall)"), screenOffKeep) {
+                    BackgroundOperation.setScreenOffKeep(it)
+                }
                 Text(tr("一轮的长度", "Turn length"), fontWeight = FontWeight.Medium, fontSize = 14.sp)
                 Text(tr("agent 安静多久算这轮结束：之后副屏省电暂停，10 分钟后释放（agent 也可以用 vscreen done 马上结束）", "How long the agent stays quiet before its turn ends: the screen then pauses to save power and is released after 10 minutes (the agent can also end at once with vscreen done)"),
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
