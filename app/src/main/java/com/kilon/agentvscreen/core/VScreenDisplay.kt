@@ -549,7 +549,7 @@ class VScreenDisplay private constructor(
             // the Shizuku UserService. An app-owned display is untrusted: the system
             // refuses `am start --display` from the shell uid and silently opens the
             // app on the main screen instead.
-            val remote = VScreenRemoteDisplay.create(name, width, height, dpi, reader.surface)
+            val remote = VScreenRemoteDisplay.create(name, width, height, dpi, reader.surface, VScreenStore.screenOffKeep.value)
             remote.onSuccess { r ->
                 lastRemoteError = null
                 val gen = synchronized(this) { ++generationCounter }
