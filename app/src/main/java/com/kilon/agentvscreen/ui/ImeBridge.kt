@@ -43,7 +43,13 @@ import kotlinx.coroutines.withContext
  * multi-line field takes one line per commit. If accessibility cannot see the background screen's tree (service
  * off, or a toolkit that hides its fields), the bridge never opens and typing stays on `vscreen act "type …"`.
  */
-internal class ImeBridge(private val ctx: Context, private val parent: ViewGroup) {
+internal class ImeBridge(
+    private val ctx: Context,
+    private val parent: ViewGroup,
+    /** Lets the host window take input focus so the sink can hold it. The floating window flips its own
+     * flag; a normal activity window (the full-screen page) is focusable already, so it passes a no-op. */
+    private val setFocusable: (Boolean) -> Unit = { Overlay.setFocusable(it) },
+) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
     private var sink: EditText? = null
@@ -124,7 +130,7 @@ internal class ImeBridge(private val ctx: Context, private val parent: ViewGroup
         suppressCommit = true
         s?.setText("")
         suppressCommit = false
-        Overlay.setFocusable(false)
+        setFocusable(false)
     }
 
     /** The background screen's focused editable field and its current text ("" when the text is only a hint). */
@@ -156,7 +162,7 @@ internal class ImeBridge(private val ctx: Context, private val parent: ViewGroup
         if (bridgeOn) return
         bridgeOn = true
         // Let the window take input focus so the sink can hold it.
-        Overlay.setFocusable(true)
+        setFocusable(true)
         s.requestFocus()
         showJob?.cancel()
         showJob = scope.launch {
