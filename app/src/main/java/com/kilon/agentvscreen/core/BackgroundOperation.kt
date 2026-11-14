@@ -183,6 +183,59 @@ object BackgroundOperation {
         mainHandler.postDelayed(idleRelease, IDLE_TTL_MS)
     }
 
+    // ── v22: the app left the screen on its own ─────────────────────────────
+    //
+    // The screen's app can be taken away without any "move to main screen"
+    // action: the user opens the same app on the main screen and the system
+    // moves its task there. The ImageReader then gets no new frames and the
+    // window keeps showing the last (now dead) picture forever — the idle
+    // timer only releases minutes later. So a light watchdog watches for a
+    // screen that stopped drawing: only when the picture is stale does it
+    // ask the system for the screen's task list, and only an actually empty
+    // screen is released (round19's releaseEmptyScreen, which checks again).
+    // A still page of a live app is never released: its task is still there.
+
+    /** How often the watchdog looks, while a screen is live. */
+    private const val EMPTY_CHECK_INTERVAL_MS = 15_000L
+    /** A picture older than this counts as stale (the producer stopped). */
+    private const val STALE_FRAME_MS = 5_000L
+
+    private val emptyCheck = Runnable {
+        Thread { runCatching { checkEmptyScreen() } }
+            .apply { isDaemon = true; name = "vscreen-empty-check" }.start()
+        if (display != null) mainHandler.postDelayed(emptyCheck, EMPTY_CHECK_INTERVAL_MS)
+    }
+
+    private fun scheduleEmptyCheck() {
+        mainHandler.removeCallbacks(emptyCheck)
+        mainHandler.postDelayed(emptyCheck, EMPTY_CHECK_INTERVAL_MS)
+    }
+
+    /**
+     * A screen whose picture stopped and whose app is gone releases itself:
+     * the window stops showing the frozen last frame and flips back to the
+     * terminal page. Guards (all must pass): the screen exists and is not
+     * parked (a parked screen is off on purpose, apps kept), nobody holds it
+     * (user takeover), no agent turn is running on it (launching/acting), it
+     * drew at least one frame once, and the picture is stale. The task list
+     * is only read when the picture is stale; null (unknown) never releases.
+     */
+    private fun checkEmptyScreen() {
+        val s = _state.value
+        val d = display?.takeIf { !it.released } ?: return
+        if (d.parked) return
+        if (s.takeoverSessionId != null) return
+        val owner = s.ownerSessionId ?: return
+        if (synchronized(lock) { owner in turns }) return
+        val last = d.lastFrameAtMs
+        if (last == 0L) return
+        if (SystemClock.elapsedRealtime() - last < STALE_FRAME_MS) return
+        val tasks = VScreenShell.taskSource(d.displayId) ?: return
+        if (tasks.any { it.isAppTask }) return
+        AppLogger.info(TAG, "screen ${d.displayId} stopped drawing and has no app task left; releasing it")
+        VScreenHandoff.releaseEmptyScreen(owner, d.displayId)
+    }
+
     // ── v21: idle power saving ─────────────────────────────────────────────
 
     /** How long an idle screen keeps running before it is paused. */
@@ -469,6 +522,7 @@ object BackgroundOperation {
     private fun releaseScreen(reason: String) {
         cancelIdleRelease()
         mainHandler.removeCallbacks(idlePark)
+        mainHandler.removeCallbacks(emptyCheck)
         _state.update { it.copy(powerSaving = false) }
         val d = synchronized(lock) { display.also { display = null } } ?: return
         // Close whatever app was left on the screen so it does not hop to the
@@ -793,6 +847,9 @@ object BackgroundOperation {
         }
         if (!d.watchRotation(ctx())) syncRotation(d)
         _state.update { it.copy(screenWidth = d.width, screenHeight = d.height) }
+        // v22: watch for the app leaving the screen on its own (taken away by
+        // the main screen), so a stolen screen does not keep a dead frame.
+        scheduleEmptyCheck()
     }
 
     /** Ask the system for the display's rotation and logical size now (service first, then DisplayManager). */
