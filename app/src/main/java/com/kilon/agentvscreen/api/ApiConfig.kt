@@ -36,8 +36,8 @@ object ApiConfig {
             ?: if (prefs.getBoolean("tailnet", false)) com.kilon.agentvscreen.host.Tailnet.Mode.SYSTEM else com.kilon.agentvscreen.host.Tailnet.Mode.OFF
         set(v) { prefs.edit().putString("tailnet_mode", v.key).apply() }
 
-    /** The system Tailscale app's address is also listened on (SYSTEM mode). */
-    val tailnet: Boolean get() = tailnetMode == com.kilon.agentvscreen.host.Tailnet.Mode.SYSTEM
+    /** This phone's tailnet address is also listened on (BUILTIN: our own node; SYSTEM: the Tailscale app). */
+    val tailnet: Boolean get() = tailnetMode != com.kilon.agentvscreen.host.Tailnet.Mode.OFF
 
     /** Device name of the built-in node in the tailnet. */
     var tailnetHostname: String

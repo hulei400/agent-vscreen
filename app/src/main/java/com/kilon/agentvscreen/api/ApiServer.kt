@@ -725,16 +725,23 @@ class ApiServer(private val ctx: Context) {
         }
 
         /**
-         * This phone's address in the system Tailscale app's tailnet, if it is connected. 1.2: only addresses of a VPN
-         * network count. Carriers also hand out 100.64.0.0/10 (carrier-grade NAT) on the mobile interface; taking
-         * "any interface with such an address" could have put the server on the mobile network.
+         * This phone's tailnet address, if it is connected. BUILTIN mode: our own Tailscale node's address (from
+         * [Tailnet.status]); SYSTEM mode: the system Tailscale app's address (a VPN network). 1.2: only addresses of
+         * a VPN network count for the system lookup. Carriers also hand out 100.64.0.0/10 (carrier-grade NAT) on the
+         * mobile interface; taking "any interface with such an address" could have put the server on the mobile network.
          */
-        fun tailnetAddress(): InetAddress? = runCatching {
-            val cm = com.kilon.agentvscreen.core.BackgroundOperation.appContextOrNull()?.getSystemService(android.net.ConnectivityManager::class.java) ?: return@runCatching null
-            @Suppress("DEPRECATION")
-            cm.allNetworks.filter { cm.getNetworkCapabilities(it)?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true }
-                .flatMap { cm.getLinkProperties(it)?.linkAddresses.orEmpty() }.map { it.address }.firstOrNull { isTailnet(it) }
-        }.getOrNull()
+        fun tailnetAddress(): InetAddress? {
+            if (ApiConfig.tailnetMode == com.kilon.agentvscreen.host.Tailnet.Mode.BUILTIN) {
+                com.kilon.agentvscreen.host.Tailnet.status.value.ip
+                    ?.let { runCatching { InetAddress.getByName(it) }.getOrNull() }?.let { return it }
+            }
+            return runCatching {
+                val cm = com.kilon.agentvscreen.core.BackgroundOperation.appContextOrNull()?.getSystemService(android.net.ConnectivityManager::class.java) ?: return@runCatching null
+                @Suppress("DEPRECATION")
+                cm.allNetworks.filter { cm.getNetworkCapabilities(it)?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true }
+                    .flatMap { cm.getLinkProperties(it)?.linkAddresses.orEmpty() }.map { it.address }.firstOrNull { isTailnet(it) }
+            }.getOrNull()
+        }
 
         fun parseForm(s: String): Map<String, List<String>> {
             if (s.isEmpty()) return emptyMap()
