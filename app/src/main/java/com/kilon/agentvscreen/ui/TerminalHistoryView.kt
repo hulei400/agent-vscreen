@@ -38,9 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,7 +56,8 @@ import java.util.Locale
  * 全屏页的“历史命令”：持久保存的全部历史（最近 200 条，重启后还在），最新的在最上面。
  *
  * 每条：命令全文、跑过的时间、退出码、输出（先看前面 8 行，点一下展开看全文）。
- * 长按一条就复制它的命令（跟浮窗终端页一样：短震一下 + “已复制”Toast），
+ * 长按一条就复制它的命令（跟浮窗终端页一样：长按自带一下短震 + “已复制”Toast，
+ * 不要再补一次 performHapticFeedback——round9 的教训，补了会震两下），
  * 点一下什么都不做，所以上下滑动翻历史时不会误复制。
  */
 @Composable
@@ -98,13 +97,12 @@ fun TerminalHistoryPage(onClose: () -> Unit) {
 @Composable
 private fun HistoryEntryItem(e: VScreenTerminal.Entry) {
     val ctx = LocalContext.current
-    val haptic = LocalHapticFeedback.current
     var expanded by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF14161F))
         .combinedClickable(
             onClick = {},
             onLongClick = {
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                // 长按本身带一下短震（框架给的），不要再补 performHapticFeedback，会震两下。
                 val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                 cm?.setPrimaryClip(ClipData.newPlainText("command", e.command))
                 Toast.makeText(ctx, tr("已复制", "Copied"), Toast.LENGTH_SHORT).show()
