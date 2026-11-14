@@ -110,6 +110,27 @@ internal object VScreenHandoff {
         BackgroundOperation.requestDockAfterMove()
     }
 
+    /**
+     * v30: same empty-screen release as [releaseEmptyScreen], but for a task
+     * that moved to the main screen (tapped from Recents, or moved by
+     * move-stack). The source screen's own task list can lag seconds behind
+     * the move and still list the moved task, so releaseEmptyScreen's
+     * re-check would refuse. The move itself is the evidence instead: every
+     * moved taskId must be on display 0 right now, or nothing is released.
+     * TaskId comparison keeps dual instances apart — a second copy of the
+     * same app on the main screen has a different taskId.
+     */
+    fun releaseMovedScreen(sessionId: String, displayId: Int, taskIds: List<Int>) {
+        if (BackgroundOperation.state.value.ownerSessionId != sessionId) return
+        if (taskIds.isEmpty()) return
+        val onMain = runCatching { tasksOn(0) }.getOrDefault(emptyList()).map { it.taskId }.toSet()
+        if (!taskIds.all { it in onMain }) return
+        BackgroundOperation.releaseNow(sessionId)
+        // The user is now using the moved app on the main screen: fold the floating window into
+        // its edge tab so it does not cover that app. Only the released (empty) screen docks.
+        BackgroundOperation.requestDockAfterMove()
+    }
+
     /** The user's own button (full-screen view): put the app on the background screen in front of them. */
     fun userToMain(sessionId: String): Pair<Boolean, String> {
         val d = BackgroundOperation.previewDisplayFor(sessionId) ?: return false to tr("副屏已经不在了", "The screen is gone")
