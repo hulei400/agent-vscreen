@@ -198,6 +198,11 @@ object BackgroundOperation {
         else if (_state.value.idle) scheduleIdlePark()
     }
 
+    /** The settings switch for keeping the screen awake while the phone is locked. */
+    fun setScreenOffKeep(on: Boolean) {
+        VScreenStore.setScreenOffKeep(on)
+    }
+
     // ── background rules hold the idle screen ─────────────────────────────
 
     /** Background rules watching the screen between turns: while > 0 the idle screen is neither paused nor released. */
