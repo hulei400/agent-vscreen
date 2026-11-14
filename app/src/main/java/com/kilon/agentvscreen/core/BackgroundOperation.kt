@@ -196,12 +196,15 @@ object BackgroundOperation {
     // screen is released (round19's releaseEmptyScreen, which checks again).
     // A still page of a live app is never released: its task is still there.
 
-    /** How often the watchdog looks, while a screen is live. v25: 5 s (was
-     *  15 s) — a stolen screen used to sit on its dead frame for 30 s+ before
-     *  the next check; with a 5 s picture-staleness bar, 5–10 s is enough. */
-    private const val EMPTY_CHECK_INTERVAL_MS = 5_000L
-    /** A picture older than this counts as stale (the producer stopped). */
-    private const val STALE_FRAME_MS = 5_000L
+    /** How often the watchdog looks, while a screen is live. v26: 1 s (was
+     *  5 s in v25, 15 s in v22) — the user measured 7 s to release and wants
+     *  it instant; with no picture-staleness bar any more, 1–2 s is enough. */
+    private const val EMPTY_CHECK_INTERVAL_MS = 1_000L
+    /** A picture older than this counts as stale (the producer stopped).
+     *  v26: 0 — no waiting at all; every tick goes straight to the task
+     *  list, and only a truly empty screen is released (the task list is the
+     *  safety net, not the clock). */
+    private const val STALE_FRAME_MS = 0L
 
     private val emptyCheck = Runnable {
         Thread { runCatching { checkEmptyScreen() } }
@@ -221,8 +224,10 @@ object BackgroundOperation {
      * parked (a parked screen is off on purpose, apps kept), nobody holds it
      * (user takeover), no agent command is executing on it right now
      * (launching/acting), it drew at least one frame once, and the picture
-     * is stale. The task list is only read when the picture is stale; null
-     * (unknown) never releases.
+     * has stopped updating (v26: the staleness bar is 0, so every tick reads
+     * the task list — the release decision is the task list, not the clock).
+     * The task list is the safety net: null (unknown) never releases, and a
+     * still page of a live app is never released — its task is still there.
      */
     private fun checkEmptyScreen() {
         val s = _state.value
