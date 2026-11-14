@@ -892,33 +892,20 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
         while (true) { left = owner?.let { Turns.leftMs(it) } ?: -1L; delay(1000) }
     }
 
-    // 流体云：画面 / 终端 切换。终端页是只读的（命令由 agent 跑，`vscreen shell`）；窗口的获焦只归输入法桥管
-    // （接管后点输入框弹系统键盘），这里不再为终端或打字行改获焦。
-    var tab by remember { mutableStateOf(TermTab.SCREEN) }
+    // 画面 / 终端 切换是共享状态（BackgroundOperation.State.page）：浮窗和全屏页读同一份，
+    // 一边切了另一边也跟着切。终端页是只读的（命令由 agent 跑，`vscreen shell`）；窗口的获焦只归
+    // 输入法桥管（接管后点输入框弹系统键盘），这里不再为终端或打字行改获焦。
     val termLog by VScreenTerminal.log.collectAsState()
-    // A shell command just finished: if there is no live screen to look at,
-    // show its output on the terminal tab instead of the picture tab spinning
-    // on nothing. A screen with an app running is left alone — and the user
-    // can always switch back by hand; this only fires when a command lands.
-    LaunchedEffect(termLog.size) {
-        if (termLog.isEmpty()) return@LaunchedEffect
-        if (tab != TermTab.SCREEN) return@LaunchedEffect
-        if (!hasLiveScreenApp()) tab = TermTab.TERMINAL
-    }
-    // A shell command popped the window up (or the screen went away while it was up): the terminal page
-    // is the only one that makes sense — force the tab there and unfold the window if it was folded into
-    // its edge tab, so the user actually sees the command. A hand switch back to the picture tab is
-    // respected until the next command pops it again.
-    LaunchedEffect(s.terminalPopAt, owner) {
-        if (s.terminalPopAt > 0L || owner == null) {
-            tab = TermTab.TERMINAL
-            if (Overlay.docked.value) Overlay.undock()
-        }
+    // A shell command popped the window up: unfold it if it was folded into its edge tab, so the user
+    // actually sees the command. The page itself is shared state now — popTerminalWindow already
+    // switched it to TERMINAL; a hand switch back is respected until the next command pops it again.
+    LaunchedEffect(s.terminalPopAt) {
+        if (s.terminalPopAt > 0L && Overlay.docked.value) Overlay.undock()
     }
     val haptic = LocalHapticFeedback.current
-    // The keyboard bridge closes when the user hands the screen back or leaves the screen tab.
-    LaunchedEffect(mode, tab) {
-        if (mode != Mode.TAKEOVER || tab != TermTab.SCREEN) Overlay.closeImeBridge()
+    // The keyboard bridge closes when the user hands the screen back or leaves the screen page.
+    LaunchedEffect(mode, s.page) {
+        if (mode != Mode.TAKEOVER || s.page != BackgroundOperation.ViewPage.SCREEN) Overlay.closeImeBridge()
     }
     // Same text as the fullscreen page's second line (agentTitleText).
     val title = agentTitleText(s, left)
@@ -929,7 +916,7 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                 Modifier.fillMaxSize().clip(RoundedCornerShape(corner)).background(Palette.ink)
                     .onGloballyPositioned { c -> val b = c.boundsInRoot(); Overlay.frameRect.set(b.left, b.top, b.right, b.bottom) },
             ) {
-                if (tab == TermTab.TERMINAL) {
+                if (s.page == BackgroundOperation.ViewPage.TERMINAL) {
                     TerminalView(k, termLog)
                 } else if (owner != null) {
                     if (picture != null) picture(owner) else VScreenLiveFrame(owner, Modifier.fillMaxSize(), interactive = false)
@@ -961,8 +948,8 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             // is no background screen yet.
             Row(Modifier.align(Alignment.TopEnd).padding(end = (6 * k).dp, top = (6 * k).dp)) {
                 if (owner != null) {
-                    PillBtn(if (tab == TermTab.TERMINAL) tr("画面", "Screen") else tr("终端", "Terminal"), Color(0xCC12141C), Color.White, k, "termTab") {
-                        tab = if (tab == TermTab.TERMINAL) TermTab.SCREEN else TermTab.TERMINAL
+                    PillBtn(if (s.page == BackgroundOperation.ViewPage.TERMINAL) tr("画面", "Screen") else tr("终端", "Terminal"), Color(0xCC12141C), Color.White, k, "termTab") {
+                        BackgroundOperation.setPage(if (s.page == BackgroundOperation.ViewPage.TERMINAL) BackgroundOperation.ViewPage.SCREEN else BackgroundOperation.ViewPage.TERMINAL)
                     }
                     Spacer(Modifier.width((5 * k).dp))
                 }
@@ -1072,9 +1059,6 @@ private fun PillBtn(text: String, bg: Color, fg: Color, k: Float, key: String, o
         contentAlignment = Alignment.Center,
     ) { Text(text, color = fg, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold) }
 }
-
-/** What the floating window shows: the background screen, or the terminal log. */
-private enum class TermTab { SCREEN, TERMINAL }
 
 /**
  * The terminal page of the floating window (Fluid Cloud): every `vscreen shell` run, in full — command, stdout,
