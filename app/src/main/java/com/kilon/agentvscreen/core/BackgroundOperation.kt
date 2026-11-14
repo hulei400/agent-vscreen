@@ -126,6 +126,12 @@ object BackgroundOperation {
          * overlay when it folds, or by any unfold.
          */
         val dockRequested: Boolean = false,
+        /**
+         * Wall-clock ms when the fold-after-move was requested (0 = no request). Lets the overlay
+         * compare the fold request with a shell-command pop by recency — the newer one wins, so
+         * the two never fight over the window.
+         */
+        val dockRequestedAt: Long = 0L,
         /** Which page the floating window and the full-screen page show (shared: a switch in either
          * place moves both). A shell command flips it to TERMINAL; a screen appearing flips it to SCREEN. */
         val page: ViewPage = ViewPage.SCREEN,
@@ -604,12 +610,12 @@ object BackgroundOperation {
      * command popping the window or a screen appearing never sets this.
      */
     fun requestDockAfterMove() {
-        _state.update { if (it.dockRequested) it else it.copy(dockRequested = true) }
+        _state.update { if (it.dockRequested) it else it.copy(dockRequested = true, dockRequestedAt = System.currentTimeMillis()) }
     }
 
     /** The fold happened, or the window was unfolded by hand / by a command: the request is spent. */
     fun clearDockRequest() {
-        _state.update { if (!it.dockRequested) it else it.copy(dockRequested = false) }
+        _state.update { if (!it.dockRequested) it else it.copy(dockRequested = false, dockRequestedAt = 0L) }
     }
 
     /** Switch the page the floating window and the full-screen page show (one shared state). */
