@@ -15,6 +15,7 @@ import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
+import com.kilon.agentvscreen.api.Turns
 import com.kilon.agentvscreen.host.VScreenAccessibilityService
 import com.kilon.agentvscreen.host.AppLogger
 import com.kilon.agentvscreen.host.ShizukuManager
@@ -216,9 +217,10 @@ object BackgroundOperation {
      * the window stops showing the frozen last frame and flips back to the
      * terminal page. Guards (all must pass): the screen exists and is not
      * parked (a parked screen is off on purpose, apps kept), nobody holds it
-     * (user takeover), no agent turn is running on it (launching/acting), it
-     * drew at least one frame once, and the picture is stale. The task list
-     * is only read when the picture is stale; null (unknown) never releases.
+     * (user takeover), no agent command is executing on it right now
+     * (launching/acting), it drew at least one frame once, and the picture
+     * is stale. The task list is only read when the picture is stale; null
+     * (unknown) never releases.
      */
     private fun checkEmptyScreen() {
         val s = _state.value
@@ -226,7 +228,12 @@ object BackgroundOperation {
         if (d.parked) return
         if (s.takeoverSessionId != null) return
         val owner = s.ownerSessionId ?: return
-        if (synchronized(lock) { owner in turns }) return
+        // v24: only a command actually running blocks the watchdog. The old
+        // "owner in turns" test also covered the session's 3-minute quiet
+        // window after its last command (Turns.quietMs), so a stolen screen
+        // was never released while the caller was merely quiet — the dead
+        // frame stayed for minutes.
+        if (Turns.isCommandRunning(owner)) return
         val last = d.lastFrameAtMs
         if (last == 0L) return
         if (SystemClock.elapsedRealtime() - last < STALE_FRAME_MS) return
