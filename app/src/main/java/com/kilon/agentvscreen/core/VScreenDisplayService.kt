@@ -11,6 +11,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.Looper
 import android.os.Parcel
+import android.os.PowerManager
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.InputEvent
@@ -18,6 +19,7 @@ import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
+import com.kilon.agentvscreen.host.AppLogger
 
 /**
  * [vscreen] Shizuku UserService: runs as the Shizuku shell user (uid 2000),
@@ -35,7 +37,8 @@ import android.view.Surface
  * so the frames still land in the app for the preview and screenshots.
  *
  * Raw binder protocol (no AIDL), interface [DESCRIPTOR]:
- *   CREATE   in: name, width, height, dpi, flags, Surface  out: status, displayId | message
+ *   CREATE   in: name, width, height, dpi, flags, screenOffKeep(0/1, protocol 11), Surface
+ *            out: status, displayId | message
  *   RELEASE  in: displayId                                 out: status
  *   PING     out: status, uid
  *   INJECT_KEY   in: displayId, keyCode, longPress(0/1)            out: status, injected(0/1)
@@ -74,6 +77,10 @@ class VScreenDisplayService : Binder {
     private val displays = HashMap<Int, VirtualDisplay>()
     private val meta = HashMap<Int, IntArray>()
     private val touched = HashMap<Int, Long>()
+    /** displayId -> per-display FULL wake lock (screen-off run, v1.3 fork). Guarded by `displays`. */
+    private val screenLocks = HashMap<Int, PowerManager.WakeLock>()
+    /** displayId -> the display wants a screen-off lock (the toggle's value at creation). Guarded by `displays`. */
+    private val lockWanted = HashMap<Int, Boolean>()
     @Volatile private var reaperStarted = false
 
     private fun startReaper() {
@@ -81,14 +88,55 @@ class VScreenDisplayService : Binder {
         reaperStarted = true
         Thread {
             while (true) {
-                Thread.sleep(60_000)
+                // 30 s, not 60 s: the screen-off locks are taken for 60 s and must be renewed in time.
+                Thread.sleep(30_000)
+                renewScreenLocks()
                 val now = SystemClock.elapsedRealtime()
                 val stale = synchronized(displays) { touched.filter { now - it.value > ORPHAN_MS }.keys.toList() }
                 for (id in stale) {
-                    synchronized(displays) { touched.remove(id); meta.remove(id); displays.remove(id) }?.let { runCatching { it.release() } }
+                    val removed = synchronized(displays) {
+                        touched.remove(id); meta.remove(id); lockWanted.remove(id)
+                        displays.remove(id) to screenLocks.remove(id)
+                    }
+                    removed.first?.let { runCatching { it.release() } }
+                    removed.second?.let { runCatching { if (it.isHeld) it.release() } }
                 }
             }
         }.apply { isDaemon = true; name = "vscreen-reaper" }.start()
+    }
+
+    /**
+     * Screen-off run (v1.3 fork): a wake lock bound to one display, the way the lejw0925 virtual-screen engine
+     * does it. A PARTIAL lock only keeps the CPU awake; the display itself can still sleep and then has to be
+     * woken again. A FULL lock on the display id keeps this display powered while the phone screen is off
+     * (never the phone's own display). Taken for 60 s and renewed by [startReaper]'s loop.
+     *
+     * The 3-arg newWakeLock is a hidden API: it is called from this Shizuku user service (shell uid), the
+     * privileged side, not from the app process. Any failure here must not break display creation: it only
+     * means falling back to VScreenAwake's wake-on-demand, which is what the app did before.
+     */
+    private fun acquireScreenLock(id: Int) {
+        val pm = runCatching { systemContext().getSystemService(PowerManager::class.java) }.getOrNull() ?: return
+        val lock = runCatching {
+            val m = PowerManager::class.java.getMethod(
+                "newWakeLock", Int::class.javaPrimitiveType, String::class.java, Int::class.javaPrimitiveType)
+            (m.invoke(pm, 0x1a, "agentvscreen:display", id) as PowerManager.WakeLock).apply {
+                setReferenceCounted(false); acquire(60_000)
+            }
+        }.onFailure { AppLogger.warning(TAG, "display wake lock unavailable for $id: ${it.message}") }.getOrNull() ?: return
+        synchronized(displays) { screenLocks[id] = lock }
+    }
+
+    /** Renew every held screen-off lock (60 s each). Called by the reaper loop. */
+    private fun renewScreenLocks() {
+        val locks = synchronized(displays) { screenLocks.values.toList() }
+        for (lock in locks) runCatching { lock.acquire(60_000) }
+    }
+
+    /** Drop the screen-off lock of one display, if any. Never throws. */
+    private fun releaseScreenLock(id: Int) {
+        val lock = synchronized(displays) { screenLocks.remove(id) }
+        runCatching { if (lock?.isHeld == true) lock.release() }
     }
 
     constructor() : super() { base = null }
@@ -96,7 +144,11 @@ class VScreenDisplayService : Binder {
 
     override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
         if (code == DESTROY_CODE) {
-            synchronized(displays) { displays.values.forEach { runCatching { it.release() } }; displays.clear() }
+            synchronized(displays) {
+                displays.values.forEach { runCatching { it.release() } }; displays.clear()
+                screenLocks.values.forEach { runCatching { if (it.isHeld) it.release() } }; screenLocks.clear()
+                lockWanted.clear()
+            }
             System.exit(0)
             return true
         }
@@ -109,8 +161,10 @@ class VScreenDisplayService : Binder {
                     val name = data.readString() ?: "agent-vscreen"
                     val w = data.readInt(); val h = data.readInt(); val dpi = data.readInt()
                     val requested = data.readInt()
+                    // Protocol 11: whether the new display keeps a screen-off wake lock.
+                    val screenOffKeep = data.readInt() != 0
                     val surface = Surface.CREATOR.createFromParcel(data)
-                    val vd = create(name, w, h, dpi, requested, surface)
+                    val vd = create(name, w, h, dpi, requested, surface, screenOffKeep)
                     val id = vd.display.displayId
                     synchronized(displays) {
                         displays[id] = vd
@@ -122,7 +176,8 @@ class VScreenDisplayService : Binder {
                 }
                 RELEASE -> {
                     val id = data.readInt()
-                    synchronized(displays) { meta.remove(id); touched.remove(id); displays.remove(id) }?.let { runCatching { it.release() } }
+                    releaseScreenLock(id)
+                    synchronized(displays) { meta.remove(id); touched.remove(id); lockWanted.remove(id); displays.remove(id) }?.let { runCatching { it.release() } }
                     out.writeInt(0)
                 }
                 PING -> { out.writeInt(0); out.writeInt(android.os.Process.myUid()) }
@@ -151,6 +206,8 @@ class VScreenDisplayService : Binder {
                     val vd = synchronized(displays) { touched[id] = SystemClock.elapsedRealtime(); displays[id] }
                         ?: throw IllegalStateException("display $id not found")
                     vd.surface = surface
+                    // Resumed after a park: take the screen-off lock again if this display wants one.
+                    if (synchronized(displays) { lockWanted[id] == true && !screenLocks.containsKey(id) }) acquireScreenLock(id)
                     out.writeInt(0)
                 }
                 TOUCH -> {
@@ -164,6 +221,8 @@ class VScreenDisplayService : Binder {
                     val vd = synchronized(displays) { touched[id] = SystemClock.elapsedRealtime(); displays[id] }
                         ?: throw IllegalStateException("display $id not found")
                     vd.surface = null
+                    // Parked on purpose: let the display sleep (re-acquired on SET_SURFACE).
+                    releaseScreenLock(id)
                     out.writeInt(0)
                 }
                 ROTATION -> {
@@ -600,7 +659,7 @@ class VScreenDisplayService : Binder {
         return null
     }
 
-    private fun create(name: String, w: Int, h: Int, dpi: Int, requested: Int, surface: Surface): VirtualDisplay {
+    private fun create(name: String, w: Int, h: Int, dpi: Int, requested: Int, surface: Surface, screenOffKeep: Boolean): VirtualDisplay {
         val dm = displayManager()
         val candidates = if (requested != 0) listOf(requested) else defaultFlagLadder()
         var last: Throwable? = null
@@ -609,6 +668,12 @@ class VScreenDisplayService : Binder {
                 val vd = dm.createVirtualDisplay(name, w, h, dpi, surface, f)
                     ?: throw IllegalStateException("createVirtualDisplay returned null")
                 lastFlags = f
+                if (screenOffKeep) {
+                    // The lock is best-effort: a failure here only falls back to VScreenAwake and
+                    // must never fail creation, so acquireScreenLock swallows everything.
+                    synchronized(displays) { lockWanted[vd.display.displayId] = true }
+                    acquireScreenLock(vd.display.displayId)
+                }
                 return vd
             } catch (t: Throwable) { last = t }
         }
@@ -641,6 +706,7 @@ class VScreenDisplayService : Binder {
     }
 
     companion object {
+        private const val TAG = "VScreenDisplayService"
         const val DESCRIPTOR = "com.kilon.agentvscreen.core.VScreenDisplayService"
         const val CREATE = FIRST_CALL_TRANSACTION
         const val RELEASE = FIRST_CALL_TRANSACTION + 1
@@ -666,7 +732,7 @@ class VScreenDisplayService : Binder {
         /** A display nobody touched for this long (Minis gone) is released. */
         const val ORPHAN_MS = 20 * 60_000L
         /** Bump when the protocol changes, so Shizuku restarts an old service process. */
-        const val PROTOCOL = 10
+        const val PROTOCOL = 11
         /** Shizuku's reserved "destroy user service" transaction. */
         const val DESTROY_CODE = 16777115
         private const val SHELL_PKG = "com.android.shell"
