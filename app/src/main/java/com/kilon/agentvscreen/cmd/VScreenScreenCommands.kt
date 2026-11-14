@@ -78,6 +78,7 @@ internal fun VScreenOffloadHandler.status(sid: String?, args: OffloadArgs): Nati
             .put("http_error", com.kilon.agentvscreen.host.HostService.server?.lastError ?: JSONObject.NULL))
         .put("accessibility_auto", com.kilon.agentvscreen.host.A11yHeal.let { h -> when {
             h.userOff(context) -> tr("用户关掉了，不再自动打开", "turned off by the user, not turned on again automatically")
+            h.needsManual(context) -> tr("系统记成已崩溃：要在 系统设置 › 无障碍 里手动开关一次（App 首页有直达入口）", "the system recorded it as crashed: toggle it by hand in Settings › Accessibility (the app's home page has a shortcut)")
             h.blocked(context) -> tr("系统拦截写入：要在 系统设置 › 无障碍 里手动打开", "the system blocks the write: turn it on by hand in Settings › Accessibility")
             h.wanted(context) -> tr("断开时自动重新打开（每分钟最多一次）", "turned on again automatically when it drops (at most once a minute)")
             else -> tr("没开过（App 首页一键配置）", "never turned on (Set up the rest on the app's home page)")

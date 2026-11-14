@@ -148,10 +148,12 @@ class MainActivity : ComponentActivity() {
         var serviceOn by remember { mutableStateOf(Prefs.serviceOn(this)) }
         var setupOpen by remember { mutableStateOf(false) }
         var liveProblem by remember { mutableStateOf(com.kilon.agentvscreen.host.Liveness.problem()) }
+        var a11yManual by remember { mutableStateOf(com.kilon.agentvscreen.host.A11yHeal.needsManual(this@MainActivity)) }
         LaunchedEffect(tick) {
             while (true) {
                 items = withContext(Dispatchers.IO) { runCatching { BackgroundOperation.refreshStatus(); Setup.check(this@MainActivity) }.getOrDefault(items) }
                 liveProblem = com.kilon.agentvscreen.host.Liveness.problem()
+                a11yManual = com.kilon.agentvscreen.host.A11yHeal.needsManual(this@MainActivity)
                 delay(2_000)
             }
         }
@@ -187,6 +189,16 @@ class MainActivity : ComponentActivity() {
                     Toast.makeText(this@MainActivity, tr("已打开：$opened。把 Agent-VScreen 设为允许自启动、关联启动和后台活动", "Opened: $opened. Allow Agent-VScreen to auto-start, be started by other apps and run in the background"), Toast.LENGTH_LONG).show()
                 }
             }
+
+            // The system recorded the accessibility service as crashed (a force-stop or a crash while it was
+            // bound): the setting is written but it never binds, and re-adding the entry does not clear that
+            // list. Only the user toggling it in Settings does — offer a one-tap shortcut instead of giving up.
+            if (a11yManual && com.kilon.agentvscreen.host.VScreenAccessibilityService.getInstance() == null) Banner(
+                tr("无障碍掉了，点一下重新打开", "Accessibility is off — tap to turn it back on"),
+                tr("系统把它记成了“已崩溃”，自动恢复连不上。点右边的按钮去系统设置 › 无障碍 › Agent-VScreen，关了再开一次就行。", "The system recorded it as crashed, so auto-recovery can't reconnect it. Tap the button on the right to open Settings › Accessibility › Agent-VScreen and turn it off and on once."),
+                Palette.stopped,
+                tr("去开无障碍", "Open Accessibility"),
+            ) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
 
             LanguageCard()
 

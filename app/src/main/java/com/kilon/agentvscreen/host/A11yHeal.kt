@@ -25,6 +25,10 @@ object A11yHeal {
     fun wanted(ctx: Context) = p(ctx).getBoolean("a11y_wanted", false)
     fun blocked(ctx: Context) = p(ctx).getBoolean("a11y_blocked", false)
     fun userOff(ctx: Context) = p(ctx).getBoolean("a11y_user_off", false)
+    /** The last heal wrote the setting but the service never bound (the system recorded it as crashed, e.g.
+     *  after a force-stop or a crash while it was bound). Re-adding the entry does not clear that list — only
+     *  the user toggling it in Settings does — so this is a reminder for the home page shortcut, not a lock. */
+    fun needsManual(ctx: Context) = p(ctx).getBoolean("a11y_needs_manual", false)
 
     /** The user asked for it (setup): heal from now on, forget earlier refusals. */
     fun want(ctx: Context) { p(ctx).edit().putBoolean("a11y_wanted", true).putBoolean("a11y_blocked", false).putBoolean("a11y_user_off", false).apply() }
@@ -40,7 +44,15 @@ object A11yHeal {
 
     /** Turn the service back on if the user wants it and nothing says no. Cheap when there is nothing to do. */
     fun maybeHeal(ctx: Context, why: String) {
-        if (VScreenAccessibilityService.getInstance() != null) return
+        if (VScreenAccessibilityService.getInstance() != null) {
+            // Connected now: forget an earlier "needs manual toggle" and an "a11y_blocked" left by the old
+            // logic (it locked the flag for every failure, including the crashed-list kind a manual toggle
+            // fixes). Only write when there is something to clear — this runs on every command. If the write
+            // is genuinely intercepted, a later disconnect re-locks it.
+            if (needsManual(ctx) || blocked(ctx))
+                p(ctx).edit().putBoolean("a11y_needs_manual", false).putBoolean("a11y_blocked", false).apply()
+            return
+        }
         if (!wanted(ctx) || blocked(ctx) || userOff(ctx) || !ShizukuManager.isReady()) return
         val now = SystemClock.elapsedRealtime()
         if (lastTry != 0L && now - lastTry < MIN_GAP_MS) return
@@ -48,8 +60,19 @@ object A11yHeal {
         Thread {
             val (ok, msg) = runCatching { Setup.enableAccessibility(ctx) }.getOrElse { false to tr("无障碍：${it.message}", "Accessibility: ${it.message}") }
             lastResult = msg
-            if (ok) healedAt = SystemClock.elapsedRealtime()
-            else if (msg.contains(tr("没连上", "did not connect")) || msg.contains(tr("写系统设置失败", "writing system settings failed"))) p(ctx).edit().putBoolean("a11y_blocked", true).apply()
+            if (ok) {
+                healedAt = SystemClock.elapsedRealtime()
+                p(ctx).edit().putBoolean("a11y_needs_manual", false).apply()
+            } else if (msg.contains(tr("写系统设置失败", "writing system settings failed"))) {
+                // The system blocks the write itself (MagicOS / HarmonyOS): respect it, stop trying.
+                p(ctx).edit().putBoolean("a11y_blocked", true).apply()
+            } else if (msg.contains(tr("没连上", "did not connect"))) {
+                // Written but never bound: the system recorded the service as crashed (a force-stop or a
+                // crash while it was bound). Re-adding the entry does not clear that list — only the user
+                // toggling it in Settings does. Never lock this as blocked: the home page offers a one-tap
+                // shortcut to the accessibility settings instead of giving up silently.
+                p(ctx).edit().putBoolean("a11y_needs_manual", true).apply()
+            }
             AppLogger.info("A11yHeal", "$why: $msg")
         }.apply { isDaemon = true; name = "a11y-heal" }.start()
     }

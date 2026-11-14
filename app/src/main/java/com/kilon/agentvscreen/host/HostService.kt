@@ -175,6 +175,13 @@ class HostService : Service() {
         return START_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Swiping the app off Recents must never stop the service: the foreground notification is the only
+        // lifecycle signal. Log it only, so a future change that stops here shows up in the log.
+        AppLogger.info("HostService", "task removed (swiped from Recents); service keeps running")
+        super.onTaskRemoved(rootIntent)
+    }
+
     /** Without a real foreground service nothing keeps this process running in the background: check, don't assume. */
     private fun goForeground() {
         runCatching { Fg.start(this, NOTE_ID, notification()) }
@@ -221,6 +228,10 @@ class HostService : Service() {
             .setContentText(err ?: "$where · CLI / HTTP / MCP")
             .setContentIntent(open)
             .setOngoing(true)
+            // Ported from android-virtual-screen's RuntimeNotification.build: on API 34+ a foreground service
+            // started from the background may have its notification deferred; IMMEDIATE keeps it shown right
+            // away. NotificationCompat's constant has the same value as the framework one.
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
         if (s.windowHidden && s.displayId != null)
             b.addAction(0, tr("显示小窗", "Show window"), PendingIntent.getService(this, 5, Intent(this, HostService::class.java).setAction(ACTION_SHOW_WINDOW), PendingIntent.FLAG_IMMUTABLE))
         else b.addAction(0, tr("查看副屏", "View screen"), PendingIntent.getActivity(this, 2, Intent(this, com.kilon.agentvscreen.ui.FullscreenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE))
