@@ -6,6 +6,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import com.kilon.agentvscreen.core.BackgroundOperation
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * A caller's "turn" without a chat to tell us: a session is busy from its first command until it has been quiet for
@@ -23,6 +26,10 @@ object Turns {
     private val quietSince = HashMap<String, Long>()
     private val doneAsked = HashSet<String>()
 
+    /** Commands executing right now, across sessions (0 when idle). HostService holds a PARTIAL_WAKE_LOCK while > 0. */
+    private val _runningCount = MutableStateFlow(0)
+    val runningCount: StateFlow<Int> = _runningCount.asStateFlow()
+
     init {
         BackgroundOperation.describeOwner = { sid -> describe(sid) }
         BackgroundOperation.ownerFreesInMs = { sid -> leftMs(sid) }
@@ -32,6 +39,7 @@ object Turns {
         val start = synchronized(this) {
             enders.remove(sid)?.let { main.removeCallbacks(it) }
             inFlight[sid] = (inFlight[sid] ?: 0) + 1
+            _runningCount.value = inFlight.values.sum()
             quietSince.remove(sid)
             active.add(sid)
         }
@@ -42,6 +50,7 @@ object Turns {
         val now = synchronized(this) {
             val n = ((inFlight[sid] ?: 1) - 1).coerceAtLeast(0)
             inFlight[sid] = n
+            _runningCount.value = inFlight.values.sum()
             if (n > 0) return
             quietSince[sid] = SystemClock.elapsedRealtime()
             if (doneAsked.remove(sid)) true else {

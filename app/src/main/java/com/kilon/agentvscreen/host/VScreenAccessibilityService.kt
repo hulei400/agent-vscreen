@@ -18,7 +18,16 @@ class VScreenAccessibilityService : AccessibilityService() {
         fun getInstance(): VScreenAccessibilityService? = instance
     }
 
-    override fun onServiceConnected() { instance = this; AppLogger.info("A11y", "connected"); com.kilon.agentvscreen.ui.Overlay.rehost() }
+    override fun onServiceConnected() {
+        instance = this; AppLogger.info("A11y", "connected"); com.kilon.agentvscreen.ui.Overlay.rehost()
+        // Boot/restore fallback, ported from android-virtual-screen: the system starts this accessibility service
+        // on boot even when the ROM blocks BOOT_COMPLETED (so BootReceiver never fires); if the user left the
+        // service on, bring HostService up here — its onCreate restores the API server. A missed start just means
+        // the user opens the app once, as before. Never crash here.
+        if (Prefs.serviceOn(applicationContext)) {
+            runCatching { HostService.start(applicationContext) }
+        }
+    }
     override fun onUnbind(intent: android.content.Intent?): Boolean { instance = null; A11yHeal.onLost(applicationContext); com.kilon.agentvscreen.ui.Overlay.rehost(); return super.onUnbind(intent) }
     override fun onDestroy() { instance = null; super.onDestroy() }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}

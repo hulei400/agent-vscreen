@@ -12,14 +12,20 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.kilon.agentvscreen.api.ApiConfig
 import com.kilon.agentvscreen.api.ApiServer
+import com.kilon.agentvscreen.api.Turns
 import com.kilon.agentvscreen.core.BackgroundOperation
 import com.kilon.agentvscreen.ui.MainActivity
 import com.kilon.agentvscreen.ui.Overlay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /** Foreground start with the type this app declares (specialUse on 14+, none before). */
@@ -87,6 +93,21 @@ class HostService : Service() {
         Liveness.init(applicationContext)
         Liveness.start()
         goForeground()
+        // CPU is held only for actual device work, and released while idle — same shape as android-virtual-screen's
+        // VirtualScreenForegroundService (its lock is "VirtualScreen:MCP"; this one is named differently on purpose).
+        // Not the FULL screen-off lock in VScreenAwake.kt (that one keeps the virtual display lit); this one only
+        // keeps the CPU awake while a command runs, so a long shell/act call can't be slept mid-way.
+        wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AgentVScreen:MCP").apply { setReferenceCounted(false) }
+        wakeJob = scope.launch {
+            Turns.runningCount.map { it > 0 }.distinctUntilChanged().collectLatest { running ->
+                if (running) try {
+                    while (currentCoroutineContext().isActive) {
+                        wakeLock?.acquire(120_000)
+                        delay(90_000)
+                    }
+                } finally { if (wakeLock?.isHeld == true) wakeLock?.release() }
+            }
+        }
         BackgroundOperation.setEnabled(true)
         server = ApiServer(applicationContext).also { it.onChange = { renotify() }; it.start(ApiConfig.port) }
         Overlay.attach(applicationContext)
@@ -106,6 +127,9 @@ class HostService : Service() {
 
     private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main)
     private var watch: kotlinx.coroutines.Job? = null
+    /** CPU only, ported from android-virtual-screen: held while a command is actually running, released when idle. */
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wakeJob: kotlinx.coroutines.Job? = null
 
     /**
      * A separate, visible notification while the user's Stop holds: the user may have pressed it (or closed the screen
@@ -164,6 +188,8 @@ class HostService : Service() {
 
     override fun onDestroy() {
         watch?.cancel()
+        wakeJob?.cancel(); wakeJob = null
+        if (wakeLock?.isHeld == true) wakeLock?.release()
         Tailnet.stop()
         com.kilon.agentvscreen.host.quiet("HostService:167") { getSystemService(NotificationManager::class.java)?.cancel(STOP_NOTE_ID) }
         Overlay.detach()
