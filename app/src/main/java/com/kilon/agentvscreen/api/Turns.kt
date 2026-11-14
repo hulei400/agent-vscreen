@@ -68,6 +68,9 @@ object Turns {
         BackgroundOperation.onTaskFinished(sid)
     }
 
+    /** Is a command of [sid] executing right now (as opposed to sitting in its quiet window). */
+    fun isCommandRunning(sid: String): Boolean = synchronized(this) { (inFlight[sid] ?: 0) > 0 }
+
     /** For BUSY: is the owner running a command, or how long until its quiet window ends. */
     fun describe(sid: String): String = synchronized(this) {
         val running = inFlight[sid] ?: 0
