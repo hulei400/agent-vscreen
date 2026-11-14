@@ -118,6 +118,14 @@ object BackgroundOperation {
          * pops the window even after the user closed it — the next command pops it again.
          */
         val terminalPopAt: Long = 0L,
+        /**
+         * The app was moved to the main screen and its (now empty) background screen released:
+         * fold the floating window into its edge tab, so it does not cover the app the user is
+         * now using on the main screen. Set by [requestDockAfterMove] on the move path only (a
+         * shell command popping the window or a screen appearing never sets it); consumed by the
+         * overlay when it folds, or by any unfold.
+         */
+        val dockRequested: Boolean = false,
         /** Which page the floating window and the full-screen page show (shared: a switch in either
          * place moves both). A shell command flips it to TERMINAL; a screen appearing flips it to SCREEN. */
         val page: ViewPage = ViewPage.SCREEN,
@@ -587,6 +595,21 @@ object BackgroundOperation {
      */
     fun popTerminalWindow() {
         _state.update { it.copy(terminalPopAt = System.currentTimeMillis(), windowHidden = false, page = ViewPage.TERMINAL) }
+    }
+
+    /**
+     * The app was moved to the main screen and its (now empty) background screen released: fold
+     * the floating window into its edge tab, so it does not cover the app the user is now using.
+     * Called from the move path only (any thread); the overlay folds on the main thread. A shell
+     * command popping the window or a screen appearing never sets this.
+     */
+    fun requestDockAfterMove() {
+        _state.update { if (it.dockRequested) it else it.copy(dockRequested = true) }
+    }
+
+    /** The fold happened, or the window was unfolded by hand / by a command: the request is spent. */
+    fun clearDockRequest() {
+        _state.update { if (!it.dockRequested) it else it.copy(dockRequested = false) }
     }
 
     /** Switch the page the floating window and the full-screen page show (one shared state). */
