@@ -5,6 +5,8 @@ import com.kilon.agentvscreen.tr
 import androidx.compose.foundation.border
 import androidx.compose.ui.draw.shadow
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -18,6 +20,7 @@ import android.view.MotionEvent
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -25,6 +28,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -76,6 +80,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
@@ -1044,6 +1049,8 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
             Text(tr("终端", "Terminal"), color = Color.White, fontSize = (12 * k).sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width((6 * k).dp))
             Text(tr("Shizuku · uid 2000", "Shizuku · uid 2000"), color = Color(0x88FFFFFF), fontSize = (10 * k).sp)
+            Spacer(Modifier.width((6 * k).dp))
+            Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = (10 * k).sp)
             Spacer(Modifier.weight(1f))
             Text(tr("清空", "Clear"), color = Color(0xFF7CC8FF), fontSize = (11 * k).sp,
                 modifier = Modifier.control("termClear").clip(RoundedCornerShape(50)).background(Color(0x22FFFFFF))
@@ -1063,11 +1070,24 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
     }
 }
 
-/** One terminal record: full text, nothing cut off (no maxLines anywhere). */
+/**
+ * One terminal record: full text, nothing cut off (no maxLines anywhere). Long-press the command line to copy
+ * the command (not the output) to the clipboard — a tap does nothing, so scrolling never copies by accident.
+ */
 @Composable
 private fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float) {
+    val ctx = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     Column(Modifier.fillMaxWidth().padding(vertical = (4 * k).dp)) {
-        Text("$ " + e.command, color = Color(0xFF7CC8FF), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
+        Text("$ " + e.command, color = Color(0xFF7CC8FF), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp,
+            modifier = Modifier.clip(RoundedCornerShape(4.dp))
+                .combinedClickable(onClick = {}, onLongClick = {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    cm?.setPrimaryClip(ClipData.newPlainText("command", e.command))
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    Toast.makeText(ctx, tr("已复制", "Copied"), Toast.LENGTH_SHORT).show()
+                })
+                .padding(vertical = (1 * k).dp))
         if (e.stdout.isNotEmpty()) Text(e.stdout.trimEnd('\n'), color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
         if (e.stderr.isNotEmpty()) Text(e.stderr.trimEnd('\n'), color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
         if (e.exitCode != 0) Text(
