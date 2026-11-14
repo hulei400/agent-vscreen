@@ -203,7 +203,7 @@ object BackgroundOperation {
     private val emptyCheck = Runnable {
         Thread { runCatching { checkEmptyScreen() } }
             .apply { isDaemon = true; name = "vscreen-empty-check" }.start()
-        if (display != null) mainHandler.postDelayed(emptyCheck, EMPTY_CHECK_INTERVAL_MS)
+        if (display != null) scheduleEmptyCheck()
     }
 
     private fun scheduleEmptyCheck() {
