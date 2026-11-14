@@ -28,16 +28,23 @@ object ApiConfig {
         set(v) { prefs.edit().putInt("quiet_min", v.coerceIn(1, 60)).apply(); Turns.quietMs = v.coerceIn(1, 60) * 60_000L }
 
     /**
-     * 1.1.6: how other devices reach this phone. OFF (default), BUILTIN (our own Tailscale node, no app needed) or
+     * 1.1.6: how other devices reach this phone. OFF, BUILTIN (our own Tailscale node, no app needed) or
      * SYSTEM (the Tailscale app on this phone; the 1.1.1 mode). The old on/off switch maps to SYSTEM.
+     * Round 7: a fresh install (nothing stored yet) defaults to BUILTIN, so the app works out of the box
+     * over its own Tailscale node; a choice the user already made (tailnet_mode, or the old on/off
+     * switch) is kept as-is.
      */
     var tailnetMode: com.kilon.agentvscreen.host.Tailnet.Mode
         get() = prefs.getString("tailnet_mode", null)?.let { com.kilon.agentvscreen.host.Tailnet.Mode.of(it) }
-            ?: if (prefs.getBoolean("tailnet", false)) com.kilon.agentvscreen.host.Tailnet.Mode.SYSTEM else com.kilon.agentvscreen.host.Tailnet.Mode.OFF
+            ?: when {
+                !prefs.contains("tailnet") -> com.kilon.agentvscreen.host.Tailnet.Mode.BUILTIN
+                prefs.getBoolean("tailnet", false) -> com.kilon.agentvscreen.host.Tailnet.Mode.SYSTEM
+                else -> com.kilon.agentvscreen.host.Tailnet.Mode.OFF
+            }
         set(v) { prefs.edit().putString("tailnet_mode", v.key).apply() }
 
-    /** This phone's tailnet address is also listened on (BUILTIN: our own node; SYSTEM: the Tailscale app). */
-    val tailnet: Boolean get() = tailnetMode != com.kilon.agentvscreen.host.Tailnet.Mode.OFF
+    /** The system Tailscale app's address is also listened on (SYSTEM mode). */
+    val tailnet: Boolean get() = tailnetMode == com.kilon.agentvscreen.host.Tailnet.Mode.SYSTEM
 
     /** Device name of the built-in node in the tailnet. */
     var tailnetHostname: String
