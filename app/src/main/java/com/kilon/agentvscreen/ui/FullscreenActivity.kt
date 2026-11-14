@@ -4,6 +4,7 @@ import com.kilon.agentvscreen.tr
 
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -38,18 +39,12 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Stop
@@ -68,8 +63,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -79,9 +72,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -103,13 +94,19 @@ import kotlin.math.roundToInt
 /**
  * The background screen full screen, as a native page: edge-to-edge and immersive, the picture fitted with the same
  * breathing border as the floating window. Hold the picture 1 s to take over; then taps, long presses and swipes go
- * to the background screen, and the bottom bar gives back / home / typing / enter. Stop, hand back and "move this
- * app to my screen" are one tap away.
+ * to the background screen, and the bottom bar gives back and hand-back. Typing works like the floating window's
+ * (see [ImeBridge]): after a takeover tap on an input box, the system keyboard pops up and the text is committed
+ * to that box. Stop, hand back and "move this app to my screen" are one tap away.
  */
 class FullscreenActivity : ComponentActivity() {
+    // The keyboard bridge, same ImeBridge as the floating window — a hidden 1x1 sink in this window
+    // summons the system keyboard for the background screen's focused field. An activity window is
+    // focusable already, so setFocusable is a no-op here.
+    private var imeBridge: ImeBridge? = null
     // The floating window shows the same picture: it steps aside while this page is in front.
     override fun onStart() { super.onStart(); Overlay.fullscreenShown(true) }
-    override fun onStop() { Overlay.fullscreenShown(false); super.onStop() }
+    override fun onStop() { imeBridge?.close(); Overlay.fullscreenShown(false); super.onStop() }
+    override fun onDestroy() { imeBridge?.detach(); imeBridge = null; super.onDestroy() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -129,6 +126,7 @@ class FullscreenActivity : ComponentActivity() {
                 FullScreen(s.ownerSessionId)
             }
         }
+        imeBridge = (window.decorView as? ViewGroup)?.let { ImeBridge(this, it) { /* already focusable */ } }
     }
 
     private fun toast(msg: String) = runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
@@ -138,8 +136,6 @@ class FullscreenActivity : ComponentActivity() {
         val s by BackgroundOperation.state.collectAsState()
         val mode = modeOf(s)
         val takenOver = mode == Mode.TAKEOVER
-        var typing by remember { mutableStateOf(false) }
-        var text by remember { mutableStateOf("") }
         var hold by remember { mutableFloatStateOf(0f) }
         var holdAt by remember { mutableStateOf(Offset.Zero) }
         var hintAt by remember { mutableLongStateOf(0L) }
@@ -157,13 +153,18 @@ class FullscreenActivity : ComponentActivity() {
             }
         }
         LaunchedEffect(session) { val sid = session ?: return@LaunchedEffect; while (true) { left = Turns.leftMs(sid) ?: -1L; delay(1000) } }
-        LaunchedEffect(takenOver) { if (!takenOver) typing = false }
+        // The keyboard bridge closes when the user hands the screen back or leaves the screen page.
+        LaunchedEffect(takenOver) { if (!takenOver) imeBridge?.close() }
+        LaunchedEffect(mode, s.page) {
+            if (mode != Mode.TAKEOVER || s.page != BackgroundOperation.ViewPage.SCREEN) imeBridge?.close()
+        }
 
         Box(Modifier.fillMaxSize().background(Color(0xFF07080D))) {
-            // The picture, fitted, with its border — or the terminal when there is no
-            // background screen yet (the screen is picked up when an app is launched).
-            if (s.displayId != null && session != null) {
-            BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(top = 56.dp, bottom = if (typing) 140.dp else 96.dp, start = 14.dp, end = 14.dp),
+            // The picture, fitted, with its border — or the terminal when the shared page says so
+            // (no background screen yet, or the user switched to it; the screen is picked up when
+            // an app is launched). The floating window shows the same page: one state, both places.
+            if (s.page == BackgroundOperation.ViewPage.SCREEN && s.displayId != null && session != null) {
+            BoxWithConstraints(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(top = 56.dp, bottom = 96.dp, start = 14.dp, end = 14.dp),
                 contentAlignment = Alignment.Center) {
                 val aspect = Overlay.aspect()
                 val boxAspect = maxWidth / maxHeight
@@ -206,6 +207,9 @@ class FullscreenActivity : ComponentActivity() {
                                 if (live) {
                                     val b = map(end, size.width.toFloat(), size.height.toFloat())
                                     com.kilon.agentvscreen.core.UserTouch.up(b?.first ?: -1, b?.second ?: -1)
+                                    // The tap may have focused an input box: check the keyboard bridge,
+                                    // same as the floating window after a takeover touch.
+                                    imeBridge?.check()
                                 } else if (takenOver) {
                                 } else if (!held && !moved) hintAt = SystemClock.uptimeMillis()
                             }
@@ -241,6 +245,14 @@ class FullscreenActivity : ComponentActivity() {
                         Text(word, Modifier.weight(1f, fill = false).basicMarquee(initialDelayMillis = 1000, velocity = 30.dp), color = Color(0xCCFFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Visible)
                     }
                 }
+                // 画面 / 终端 切换：同一份共享状态，浮窗和这里读同一份，一边切了另一边也跟着切。
+                // 没副屏时只有终端页，开关不显示。
+                if (s.displayId != null && session != null) {
+                    TextPill(if (s.page == BackgroundOperation.ViewPage.TERMINAL) tr("画面", "Screen") else tr("终端", "Terminal")) {
+                        BackgroundOperation.setPage(if (s.page == BackgroundOperation.ViewPage.TERMINAL) BackgroundOperation.ViewPage.SCREEN else BackgroundOperation.ViewPage.TERMINAL)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                }
                 when (mode) {
                     Mode.ACTING, Mode.STANDBY -> Pill(tr("停止 AI", "Stop AI"), Icons.Filled.Stop, Palette.stopped, Color.White) { BackgroundOperation.userStop() }
                     // "Close screen" only makes sense once there is a screen; with none, the
@@ -264,28 +276,6 @@ class FullscreenActivity : ComponentActivity() {
             // Bottom bar.
             Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().imePadding().navigationBarsPadding().padding(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (typing) {
-                    val fr = remember { FocusRequester() }
-                    LaunchedEffect(Unit) { fr.requestFocus() }
-                    fun send() {
-                        val t = text.trim(); if (t.isEmpty()) return
-                        text = ""
-                        vscreenUserInput(session) { id ->
-                            val r = runCatching { com.kilon.agentvscreen.core.VScreenTyping.typeText(id, t, append = true) }
-                            r.exceptionOrNull()?.let { toast(tr("没输进去：${it.message?.take(60)}", "Not typed: ${it.message?.take(60)}")) }
-                        }
-                    }
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF1B1E2A)).padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.weight(1f)) {
-                            if (text.isEmpty()) Text(tr("输入到副屏里有焦点的输入框", "Types into the focused input box on the screen"), color = Color(0x88FFFFFF), fontSize = 15.sp)
-                            BasicTextField(text, { text = it }, Modifier.fillMaxWidth().focusRequester(fr), singleLine = true,
-                                textStyle = TextStyle(color = Color.White, fontSize = 15.sp), cursorBrush = SolidColor(Palette.standby),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send), keyboardActions = KeyboardActions(onSend = { send() }))
-                        }
-                        Circle(Icons.AutoMirrored.Filled.Send, tr("发送", "Send"), Palette.brandA) { send() }
-                    }
-                }
                 // 底部药丸条：窄屏上三个按钮放不下就自动换行，不裁掉。
                 FlowRow(Modifier.clip(RoundedCornerShape(30.dp)).background(Color(0xE612141C)).padding(horizontal = 10.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -293,8 +283,6 @@ class FullscreenActivity : ComponentActivity() {
                     itemVerticalAlignment = Alignment.CenterVertically) {
                     if (takenOver) {
                         Circle(Icons.AutoMirrored.Filled.ArrowBack, tr("返回", "Back"), Color(0x22FFFFFF)) { vscreenUserInput(session) { VScreenShell.key(it, "back") } }
-                        Circle(Icons.Filled.Keyboard, tr("打字", "Type"), if (typing) Palette.brandA else Color(0x22FFFFFF)) { typing = !typing }
-                        Circle(Icons.AutoMirrored.Filled.KeyboardReturn, tr("回车", "Enter"), Color(0x22FFFFFF)) { vscreenUserInput(session) { VScreenShell.key(it, "enter") } }
                         Pill(tr("交还 AI", "Hand back"), Icons.Filled.SmartToy, Palette.takeover, Color(0xFF052E1C)) { BackgroundOperation.userResume() }
                     } else {
                         if (mode == Mode.STOPPED) Pill(tr("交还 AI", "Hand back"), Icons.Filled.SmartToy, Palette.takeover, Color(0xFF052E1C)) { BackgroundOperation.userResume() }
@@ -382,6 +370,15 @@ private fun Pill(label: String, icon: ImageVector, bg: Color, fg: Color, onClick
         Icon(icon, null, tint = fg, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(6.dp))
         Text(label, color = fg, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** Small text-only pill (the 画面 / 终端 switch in the top bar — same control as the floating window's). */
+@Composable
+private fun TextPill(label: String, onClick: () -> Unit) {
+    Row(Modifier.height(36.dp).clip(RoundedCornerShape(18.dp)).background(Color(0x33FFFFFF)).clickable(onClick = onClick).padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
