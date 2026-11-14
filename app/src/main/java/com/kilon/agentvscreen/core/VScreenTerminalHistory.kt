@@ -31,6 +31,13 @@ object VScreenTerminalHistory {
     fun init(context: Context) {
         synchronized(lock) {
             if (dir == null) dir = context.applicationContext.filesDir
+            // 让内存日志的 id 从持久历史的最大值往后接：不然进程重启后 id 又从 1
+            // 开始，跟文件里的旧条目撞号，历史页 LazyColumn 一打开就闪退
+            //（round33 根因：实测文件里 id 1 出现了 17 次）。失败也不影响启动。
+            runCatching {
+                val max = loadLocked().maxOfOrNull { it.id } ?: 0L
+                VScreenTerminal.seedNextId(max + 1)
+            }
         }
     }
 
@@ -42,8 +49,12 @@ object VScreenTerminalHistory {
         synchronized(lock) {
             runCatching {
                 val list = loadLocked()
-                list += entry
-                f.appendText(toJson(entry) + "\n")
+                // 进程重启后内存 id 从 1 重来：新条目可能跟文件里的旧条目撞号，
+                // 写进去之前先换成新的唯一 id（内存里那份不动，两个列表各用各的 id）。
+                val toStore = if (list.any { it.id == entry.id })
+                    entry.copy(id = (list.maxOfOrNull { it.id } ?: 0L) + 1) else entry
+                list += toStore
+                f.appendText(toJson(toStore) + "\n")
                 if (list.size > MAX_ENTRIES + TRIM_SLACK) {
                     while (list.size > MAX_ENTRIES) list.removeAt(0)
                     rewriteLocked(f, list)
@@ -84,8 +95,32 @@ object VScreenTerminalHistory {
             }
         }
         while (list.size > MAX_ENTRIES) list.removeAt(0)
+        // 自愈：旧文件里可能已有重复 id（nextId 曾在进程重启后从 1 重来；
+        // 实测 id 1 出现过 17 次），不修的话历史页一打开就闪退；改过就把文件重写一遍。
+        if (repairDuplicateIds(list)) {
+            f?.let { rewriteLocked(it, list) }
+        }
         cache = list
         return list
+    }
+
+    /**
+     * 把 list 里的重复 id 换成新的唯一 id：按顺序，第一次出现的留原 id，
+     * 后面的往最大值 +1 接。返回是否改过。
+     */
+    private fun repairDuplicateIds(list: MutableList<VScreenTerminal.Entry>): Boolean {
+        val seen = HashSet<Long>(list.size)
+        var next = list.maxOfOrNull { it.id } ?: 0L
+        var changed = false
+        for (i in list.indices) {
+            val e = list[i]
+            if (!seen.add(e.id)) {
+                next += 1
+                list[i] = e.copy(id = next)
+                changed = true
+            }
+        }
+        return changed
     }
 
     private fun rewriteLocked(f: File, list: List<VScreenTerminal.Entry>) {
