@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -30,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,25 +49,50 @@ import com.kilon.agentvscreen.core.VScreenTerminal
 import com.kilon.agentvscreen.core.VScreenTerminalHistory
 import com.kilon.agentvscreen.tr
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/** 收起时先看几行输出（超过这个行数才出现“展开全文”按钮）。 */
+private const val PREVIEW_LINES = 8
+
 /**
- * 全屏页的“历史命令”：持久保存的全部历史（最近 200 条，重启后还在），最新的在最上面。
+ * 全屏页的“历史命令”：持久保存的全部历史（最近 200 条，重启后还在），时间倒序、
+ * 最新的在最上面。
  *
- * 每条：命令全文、跑过的时间、退出码、输出（先看前面 8 行，点一下展开看全文）。
+ * 新命令跑完会自动刷新并跳回最新那条：订阅内存日志，最新一条的 id 一变就重载
+ * 历史并 scrollToItem(0)。id 是单调递增的，即使内存日志已满 50 条、size 不变，
+ * 也能感知到新命令；清空后 id 变 null，会刷新成空列表。事件驱动，不轮询。
+ * 每条：命令全文、跑过的时间、退出码、输出。输出太长时默认只露前面 8 行，
+ * 下面有个明确的“展开全文（共 N 行）”按钮，点开后变“收起”；短输出直接全显，
+ * 没有按钮。展开状态按条目的 id 记（items 加了 key），新命令插到最上面时
+ * 各条的展开/收起不会串位。
  * 长按一条就复制它的命令（跟浮窗终端页一样：长按自带一下短震 + “已复制”Toast，
  * 不要再补一次 performHapticFeedback——round9 的教训，补了会震两下），
- * 点一下什么都不做，所以上下滑动翻历史时不会误复制。
+ * 点卡片其它地方什么都不做，所以上下滑动翻历史时不会误复制。
  */
 @Composable
 fun TerminalHistoryPage(onClose: () -> Unit) {
     val ctx = LocalContext.current
     var entries by remember { mutableStateOf<List<VScreenTerminal.Entry>?>(null) }
-    LaunchedEffect(Unit) {
-        entries = withContext(Dispatchers.IO) { VScreenTerminalHistory.load().asReversed() }
+    val listState = rememberLazyListState()
+    // 订阅内存日志：run() 里先更新 log、后写历史文件，最新 id 一变就知道来了新命令。
+    val liveLog by VScreenTerminal.log.collectAsState()
+    val newestId = liveLog.lastOrNull()?.id
+    var lastShownNewestId by remember { mutableStateOf<Long?>(null) }
+
+    LaunchedEffect(newestId) {
+        // 留一点余量，等 append 写进历史文件再读（run 里 log 和文件是前后脚）。
+        delay(150)
+        val fresh = withContext(Dispatchers.IO) { VScreenTerminalHistory.load().asReversed() }
+        val freshNewestId = fresh.firstOrNull()?.id
+        entries = fresh
+        if (freshNewestId != null && freshNewestId != lastShownNewestId) {
+            lastShownNewestId = freshNewestId
+            listState.scrollToItem(0)
+        }
     }
     Column(Modifier.fillMaxSize().background(Color(0xFF07080D)).statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp)) {
         val list = entries
@@ -86,8 +113,9 @@ fun TerminalHistoryPage(onClose: () -> Unit) {
                 tr("还没有跑过命令：用 vscreen shell 跑一条命令，它就会出现在这里。",
                     "No commands run yet: run one with vscreen shell and it will show up here."),
                 color = Color(0x99FFFFFF), fontSize = 14.sp)
-            else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                itemsIndexed(list) { _, e -> HistoryEntryItem(e) }
+            else -> LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // 按 id 记 key：新命令插到最上面时，各条的展开/收起状态不串位。
+                itemsIndexed(list, key = { _, e -> e.id }) { _, e -> HistoryEntryItem(e) }
             }
         }
     }
@@ -130,16 +158,30 @@ private fun HistoryEntryItem(e: VScreenTerminal.Entry) {
         }
         if (out.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
-            if (expanded) {
-                Text(out, color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-                Text(tr("点一下收起 ↑", "Tap to collapse ↑"), color = Color(0x88FFFFFF), fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp).clickable { expanded = false })
+            val lines = out.lines()
+            val isLong = lines.size > PREVIEW_LINES
+            if (isLong && !expanded) {
+                Text(lines.take(PREVIEW_LINES).joinToString("\n") + "\n…",
+                    color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
             } else {
-                val lines = out.lines()
-                val preview = if (lines.size > 8) lines.take(8).joinToString("\n") + "\n…（共 ${lines.size} 行，点一下看全文）"
-                    else out
-                Text(preview, color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = 13.sp,
-                    modifier = Modifier.clickable { if (lines.size > 8) expanded = true })
+                Text(out, color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+            }
+            if (isLong) {
+                // 明确的展开/收起按钮，不要只靠点输出文本那种隐式手势。
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0x22FFFFFF))
+                        .clickable { expanded = !expanded }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        if (expanded) tr("收起 ▴", "Collapse ▴")
+                        else tr("展开全文（共 ${lines.size} 行） ▾", "Show all (${lines.size} lines) ▾"),
+                        color = Color(0xFF7CC8FF), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
