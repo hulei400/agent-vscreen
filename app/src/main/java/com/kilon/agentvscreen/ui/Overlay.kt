@@ -31,6 +31,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -1121,8 +1122,11 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
                     color = Color(0x88FFFFFF), fontSize = (11 * k).sp, lineHeight = (15 * k).sp)
             }
         } else {
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().control("termLog").scrollControl("termLog")) {
-                items(entries, key = { it.id }) { e -> TerminalEntryView(e, k) }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize().control("termLog").scrollControl("termLog"), contentPadding = PaddingValues(end = (8 * k).dp)) {
+                    items(entries, key = { it.id }) { e -> TerminalEntryView(e, k) }
+                }
+                TerminalScrollbar(listState)
             }
         }
     }

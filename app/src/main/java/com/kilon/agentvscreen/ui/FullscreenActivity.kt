@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -344,8 +345,11 @@ private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
                     color = Color(0x88FFFFFF), fontSize = 14.sp, lineHeight = 20.sp)
             }
         } else {
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
-                items(entries, key = { it.id }) { e -> TerminalEntryView(e, 1f) }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(end = 10.dp)) {
+                    items(entries, key = { it.id }) { e -> TerminalEntryView(e, 1f) }
+                }
+                TerminalScrollbar(listState)
             }
         }
     }

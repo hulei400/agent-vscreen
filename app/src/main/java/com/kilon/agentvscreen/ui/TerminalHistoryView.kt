@@ -11,6 +11,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -113,9 +114,17 @@ fun TerminalHistoryPage(onClose: () -> Unit) {
                 tr("还没有跑过命令：用 vscreen shell 跑一条命令，它就会出现在这里。",
                     "No commands run yet: run one with vscreen shell and it will show up here."),
                 color = Color(0x99FFFFFF), fontSize = 14.sp)
-            else -> LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // 按 id 记 key：新命令插到最上面时，各条的展开/收起状态不串位。
-                itemsIndexed(list, key = { _, e -> e.id }) { _, e -> HistoryEntryItem(e) }
+            else -> Box(Modifier.fillMaxWidth().weight(1f)) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(end = 10.dp),
+                ) {
+                    // 按 id 记 key：新命令插到最上面时，各条的展开/收起状态不串位。
+                    itemsIndexed(list, key = { _, e -> e.id }) { _, e -> HistoryEntryItem(e) }
+                }
+                TerminalScrollbar(listState)
             }
         }
     }
