@@ -1124,7 +1124,7 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
         } else {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize().control("termLog").scrollControl("termLog"), contentPadding = PaddingValues(end = (8 * k).dp)) {
-                    items(entries, key = { it.id }) { e -> TerminalEntryView(e, k) }
+                    items(entries, key = { it.id }) { e -> TerminalEntryView(e, k, collapsible = true) }
                 }
                 TerminalScrollbar(listState)
             }
@@ -1136,10 +1136,18 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
  * One terminal record: full text, nothing cut off (no maxLines anywhere). Long-press the command line to copy
  * the command (not the output) to the clipboard — combinedClickable's built-in long-press haptic gives one
  * short buzz, and a "已复制" toast confirms; a tap does nothing, so scrolling never copies by accident.
+ *
+ * `collapsible` (floating window only): output is fully folded by default — the entry shows just the command
+ * line and the exit code, plus an "展开输出 ▾" button when there is output to show; tap it to read the full
+ * output, tap again to fold. The floating window is small, so this saves a lot of space. The fullscreen
+ * terminal page calls without it and keeps the full output expanded as before.
  */
 @Composable
-internal fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float) {
+internal fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float, collapsible: Boolean = false) {
     val ctx = LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
+    val hasOutput = e.stdout.isNotEmpty() || e.stderr.isNotEmpty()
+    val showOutput = !collapsible || expanded
     Column(Modifier.fillMaxWidth().padding(vertical = (4 * k).dp)) {
         Text("$ " + e.command, color = Color(0xFF7CC8FF), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp,
             modifier = Modifier.clip(RoundedCornerShape(4.dp))
@@ -1149,12 +1157,25 @@ internal fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float) {
                     Toast.makeText(ctx, tr("已复制", "Copied"), Toast.LENGTH_SHORT).show()
                 })
                 .padding(vertical = (1 * k).dp))
-        if (e.stdout.isNotEmpty()) Text(e.stdout.trimEnd('\n'), color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
-        if (e.stderr.isNotEmpty()) Text(e.stderr.trimEnd('\n'), color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
+        if (showOutput) {
+            if (e.stdout.isNotEmpty()) Text(e.stdout.trimEnd('\n'), color = Color(0xFFE8E8E8), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
+            if (e.stderr.isNotEmpty()) Text(e.stderr.trimEnd('\n'), color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
+        }
         if (e.exitCode != 0) Text(
             if (e.timedOut) tr("⏱ 超时，已终止（退出码 124，用时 ${e.durationMs}ms）", "⏱ timed out, killed (exit 124, ${e.durationMs} ms)")
             else tr("退出码 ${e.exitCode}（用时 ${e.durationMs}ms）", "exit ${e.exitCode} (${e.durationMs} ms)"),
             color = Color(0xFFFFB347), fontSize = (10 * k).sp)
+        else if (collapsible) Text(tr("✓ 退出码 0（用时 ${e.durationMs}ms）", "✓ exit 0 (${e.durationMs} ms)"),
+            color = Color(0xFF8FD694), fontSize = (10 * k).sp)
+        if (collapsible && hasOutput) {
+            val lines = (e.stdout + e.stderr).trimEnd('\n').lines().size
+            Text(
+                if (expanded) tr("收起 ▴", "Collapse ▴")
+                else tr("展开输出（共 $lines 行）▾", "Show output ($lines lines) ▾"),
+                color = Color(0xFF7CC8FF), fontSize = (10 * k).sp,
+                modifier = Modifier.padding(top = (2 * k).dp).clip(RoundedCornerShape(4.dp))
+                    .clickable { expanded = !expanded }.padding(vertical = (1 * k).dp))
+        }
         Box(Modifier.fillMaxWidth().padding(top = (4 * k).dp).height(1.dp).background(Color(0x22FFFFFF)))
     }
 }
