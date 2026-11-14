@@ -579,11 +579,13 @@ object Overlay {
 
     internal fun openFull() {
         val c = ctx ?: return
-        // The full-screen page works with no background screen too (it shows the terminal and its
-        // history then, and picks the screen up when an app is launched), so only a missing
-        // session stops it.
+        // The full-screen page works with no background screen and no session too (it shows the
+        // terminal and its history then, and picks the screen up when an app is launched), so
+        // only open it when there is something to show: a screen, or a popped-up terminal
+        // window. A shell-only turn never owns a session (ownerSessionId stays null), so a
+        // missing session must not stop it.
         val s = BackgroundOperation.state.value
-        if (s.ownerSessionId == null) return
+        if (s.displayId == null && s.terminalPopAt <= 0L) return
         runCatching { c.startActivity(Intent(c, FullscreenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
 
