@@ -67,13 +67,15 @@ internal object VScreenRemoteDisplay {
         }
     }
 
-    fun create(name: String, width: Int, height: Int, dpi: Int, surface: Surface): Result<Created> = runCatching {
+    fun create(name: String, width: Int, height: Int, dpi: Int, surface: Surface, screenOffKeep: Boolean = true): Result<Created> = runCatching {
         val b = service().getOrThrow()
         val data = Parcel.obtain(); val reply = Parcel.obtain()
         try {
             data.writeInterfaceToken(VScreenDisplayService.DESCRIPTOR)
             data.writeString(name); data.writeInt(width); data.writeInt(height); data.writeInt(dpi)
             data.writeInt(0) // 0 = let the service walk its flag ladder
+            // Protocol 11: whether the new display keeps a screen-off wake lock (see VScreenDisplayService).
+            data.writeInt(if (screenOffKeep) 1 else 0)
             surface.writeToParcel(data, 0)
             b.transact(VScreenDisplayService.CREATE, data, reply, 0)
             if (reply.readInt() != 0) error(reply.readString() ?: "unknown error")
