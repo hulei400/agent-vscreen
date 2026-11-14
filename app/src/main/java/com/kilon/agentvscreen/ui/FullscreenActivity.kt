@@ -338,7 +338,7 @@ private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
         val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
         if (last == null || last >= entries.size - 2) listState.scrollToItem(entries.size - 1)
     }
-    Column(Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color(0xFF0B0D14)).padding(horizontal = 14.dp, top = 12.dp, bottom = 12.dp)) {
+    Column(Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color(0xFF0B0D14)).padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(tr("终端", "Terminal"), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(6.dp))
