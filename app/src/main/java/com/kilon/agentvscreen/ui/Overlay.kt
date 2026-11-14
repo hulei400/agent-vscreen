@@ -23,6 +23,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -899,7 +901,8 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             ) {
                 Box(Modifier.size((7 * k).dp).clip(CircleShape).background(if (mode == Mode.ACTING) Brush.sweepGradient(Palette.rainbow) else Brush.linearGradient(listOf(Palette.of(mode), Palette.of(mode)))))
                 Spacer(Modifier.width((5 * k).dp))
-                Text(title, color = Color.White, fontSize = (11 * k).sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                // Long title scrolls sideways (marquee) instead of "…"; short titles stay still.
+                Text(title, Modifier.weight(1f, fill = false).basicMarquee(delayMillis = 1000, velocity = 30.dp), color = Color.White, fontSize = (11 * k).sp, maxLines = 1, overflow = TextOverflow.Visible, fontWeight = FontWeight.Medium)
             }
 
             // Buttons, top right: terminal tab, full screen, close. Same places in every state.
