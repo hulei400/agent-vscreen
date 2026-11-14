@@ -17,9 +17,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ViewConfiguration
 import android.view.WindowManager
-import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
-import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -41,9 +39,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -66,7 +61,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,7 +68,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -82,14 +75,10 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -107,9 +96,7 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.kilon.agentvscreen.api.Turns
 import com.kilon.agentvscreen.core.BackgroundOperation
-import com.kilon.agentvscreen.core.VScreenShell
 import com.kilon.agentvscreen.core.VScreenTerminal
-import com.kilon.agentvscreen.core.VScreenTyping
 import com.kilon.agentvscreen.host.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -145,11 +132,11 @@ import kotlin.math.roundToInt
  *    pill at the bottom right takes over at once (with a vibration), and “交还 AI” hands back — the window is
  *    view-only by default, never operable by accident;
  *  - while you hold the screen, taps / swipes / long presses on the picture go to the background screen, and you move
- *    the window by its title pill. The “键盘” pill (while you hold the screen) opens a typing row: what you type goes
- *    into the focused input box on the background screen.
- *  - the “终端” pill at the top right switches the picture to the terminal: every `vscreen shell` run and every
- *    command typed in the window is listed there in full (command, stdout, stderr, exit code), newest at the bottom,
- *    with a command line of its own. The window becomes focusable while the terminal is open so the keyboard works.
+ *    the window by its title pill. Tap an input box on the picture and the system keyboard pops up: a hidden sink
+ *    in this window carries the typing to the background screen's focused field (see [ImeBridge]).
+ *  - the “终端” pill at the top right switches the picture to the terminal: every `vscreen shell` run is listed
+ *    there in full (command, stdout, stderr, exit code), newest at the bottom, and the log scrolls. The terminal
+ *    is read-only here; commands are run by the agent (`vscreen shell`), not typed in the window.
  * Buttons (1.1.6: one job per place, so a quick double tap can never stop the AI by accident):
  * Buttons (1.1.6: one job per place, so a quick double tap can never stop the AI by accident):
  *  - top right: ⤢ full screen and × close. × is always there and always one tap: while the AI works it only hides the
@@ -182,6 +169,10 @@ object Overlay {
     internal val frameRect = RectF()
     internal val pillRect = RectF()
     internal val controls = HashMap<String, RectF>()
+    /** Regions whose drag scrolls their content instead of moving the window (the terminal log). */
+    internal val scrollControls = HashMap<String, RectF>()
+    /** The keyboard bridge (hidden input sink); created with the window, gone with it. */
+    private var imeBridge: ImeBridge? = null
 
     /** Our full-screen page is in front: it shows the same picture, so the floating window steps aside. */
     private val fullscreenOpen = MutableStateFlow(false)
@@ -205,10 +196,10 @@ object Overlay {
     fun refresh() { val s = BackgroundOperation.state.value; if (s.displayId != null && s.showPreview && !s.windowHidden && !fullscreenOpen.value) show() }
 
     /**
-     * Let the window take keyboard focus (so a text field in it can open the soft keyboard), or back to
-     * not focusable. The window is not focusable by default: it floats over the user's apps and must never steal
-     * the back key or the keyboard from them. Only the terminal tab and the typing row turn it on, and only while
-     * they are open.
+     * Let the window take keyboard focus (so the keyboard bridge's hidden sink can open the soft keyboard), or
+     * back to not focusable. The window is not focusable by default: it floats over the user's apps and must
+     * never steal the back key or the keyboard from them. Only the keyboard bridge turns it on, and only while
+     * it is open.
      */
     fun setFocusable(on: Boolean) {
         val v = root ?: return; val l = lp ?: return
@@ -219,6 +210,14 @@ object Overlay {
         runCatching { hostWm?.updateViewLayout(v, l) }
             .onFailure { AppLogger.warning("Overlay", "setFocusable: ${it.message}") }
     }
+
+    /** A takeover touch just ended: maybe an input box now has focus — check the keyboard bridge. */
+    internal fun onTakeoverTouchUp() { imeBridge?.check() }
+
+    /** Close the keyboard bridge (takeover ended, tab left the screen, window going away). */
+    internal fun closeImeBridge() { imeBridge?.close() }
+
+    internal fun hitScroll(x: Float, y: Float) = scrollControls.values.any { it.contains(x, y) }
 
     /** 1.1.6: the × button. One tap, never a lock: see [BackgroundOperation.closeWindow]. */
     fun closeTapped() {
@@ -311,6 +310,7 @@ object Overlay {
         g.addView(v, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
         runCatching { wm.addView(g, l); root = g; hostWm = wm; hostedByA11y = a11y }
             .onSuccess {
+                imeBridge = ImeBridge(c, g)
                 AppLogger.info("Overlay", "window added (${if (a11y) "accessibility overlay" else "app overlay"})")
                 // Once laid out its real size is known: keep all of it on screen.
                 if (!docked.value) g.post { keepOnScreen() }
@@ -320,11 +320,13 @@ object Overlay {
 
     private fun hide() {
         stopAnim()
+        imeBridge?.detach(); imeBridge = null
         val v = root ?: return
         runCatching { hostWm?.removeView(v) }.onFailure { AppLogger.warning("Overlay", "removeView: ${it.message}") }
         placeQueued = false
         root = null; hostWm = null; owner?.destroy(); owner = null
         controls.clear()
+        scrollControls.clear()
     }
 
     // 1.2.0-beta2: the window's width is remembered per orientation of the background screen. One number for both
@@ -613,6 +615,7 @@ private class GestureFrame(ctx: Context) : FrameLayout(ctx) {
     private val main = Handler(Looper.getMainLooper())
     private var claim = Claim.NONE
     private var onControl = false
+    private var onScroll = false
     private var onPill = false
     private var downRaw = Offset.Zero
     private var downLocal = Offset.Zero
@@ -686,6 +689,7 @@ private class GestureFrame(ctx: Context) : FrameLayout(ctx) {
                 downAt = SystemClock.uptimeMillis()
                 winX = Overlay.lp?.x ?: 0; winY = Overlay.lp?.y ?: 0
                 onControl = !docked && Overlay.hitControl(ev.x, ev.y)
+                onScroll = !docked && Overlay.hitScroll(ev.x, ev.y)
                 onPill = !docked && Overlay.pillRect.contains(ev.x, ev.y)
                 childGotDown = false
                 if (onControl) { childGotDown = true; super.dispatchTouchEvent(ev) }
@@ -748,12 +752,20 @@ private class GestureFrame(ctx: Context) : FrameLayout(ctx) {
                             else Overlay.shrinkLive(ev.x, ev.y, ((zone - dist) / (zone - edge)).coerceIn(0f, 1f))
                         }
                     }
-                    Claim.NONE -> if (hypot(raw.x - downRaw.x, raw.y - downRaw.y) > slop) {
-                        stopHold(); cancelChildren(ev)
-                        claim = Claim.MOVE
-                        if (claim == Claim.MOVE && docked) winX = Overlay.lp?.x ?: 0
-                    } else if (onControl) super.dispatchTouchEvent(ev)
-                    else -> {}
+                    Claim.NONE -> when {
+                        // A drag that starts on a scrollable region (the terminal log) scrolls that region: the
+                        // child keeps getting the moves and the window never claims the drag. Without this the
+                        // drag past the touch slop cancelled the child and moved the window instead, so the log
+                        // could never be scrolled. The window is still moved by its title pill.
+                        onScroll -> super.dispatchTouchEvent(ev)
+                        hypot(raw.x - downRaw.x, raw.y - downRaw.y) > slop -> {
+                            stopHold(); cancelChildren(ev)
+                            claim = Claim.MOVE
+                            if (docked) winX = Overlay.lp?.x ?: 0
+                        }
+                        onControl -> super.dispatchTouchEvent(ev)
+                        else -> {}
+                    }
                 }
                 return true
             }
@@ -774,7 +786,11 @@ private class GestureFrame(ctx: Context) : FrameLayout(ctx) {
                         Overlay.resetShrink()
                         if (v != null && hypot(v.first, v.second) > flingMin) Overlay.fling(v.first, v.second, ev.rawY) else Overlay.settle(ev.rawY)
                     }
-                    Claim.LIVE -> { val p = onScreen(ev.x, ev.y); com.kilon.agentvscreen.core.UserTouch.up(p?.first ?: -1, p?.second ?: -1) }
+                    Claim.LIVE -> {
+                        val p = onScreen(ev.x, ev.y); com.kilon.agentvscreen.core.UserTouch.up(p?.first ?: -1, p?.second ?: -1)
+                        // The tap may have focused an input box: check the keyboard bridge.
+                        Overlay.onTakeoverTouchUp()
+                    }
                     Claim.HELD -> {}
                     Claim.NONE -> when {
                         onControl -> super.dispatchTouchEvent(ev)
@@ -816,6 +832,13 @@ private fun Modifier.control(key: String): Modifier {
     return this.onGloballyPositioned { c -> val b = c.boundsInRoot(); Overlay.controls[key] = RectF(b.left, b.top, b.right, b.bottom) }
 }
 
+/** Report a scrollable region's bounds so the gesture frame lets its drags scroll it instead of moving the window. */
+@Composable
+private fun Modifier.scrollControl(key: String): Modifier {
+    DisposableEffect(key) { onDispose { Overlay.scrollControls.remove(key) } }
+    return this.onGloballyPositioned { c -> val b = c.boundsInRoot(); Overlay.scrollControls[key] = RectF(b.left, b.top, b.right, b.bottom) }
+}
+
 @Composable
 internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (@Composable (String) -> Unit)? = null) {
     val live by BackgroundOperation.state.collectAsState()
@@ -836,35 +859,14 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
         while (true) { left = Turns.leftMs(owner) ?: -1L; delay(1000) }
     }
 
-    // 流体云：画面 / 终端 切换、打字行。终端打开或打字行打开时窗口可获焦（键盘能弹出来），关掉就恢复不获焦。
+    // 流体云：画面 / 终端 切换。终端页是只读的（命令由 agent 跑，`vscreen shell`）；窗口的获焦只归输入法桥管
+    // （接管后点输入框弹系统键盘），这里不再为终端或打字行改获焦。
     var tab by remember { mutableStateOf(TermTab.SCREEN) }
-    var typing by remember { mutableStateOf(false) }
-    var kbdText by remember { mutableStateOf("") }
     val termLog by VScreenTerminal.log.collectAsState()
-    val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
-    val context = LocalContext.current
-    val view = LocalView.current
-    val imm = remember { context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager }
-    val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
-    LaunchedEffect(tab, typing) {
-        Overlay.setFocusable(tab == TermTab.TERMINAL || typing)
-        if (tab != TermTab.TERMINAL && !typing) imm.hideSoftInputFromWindow(view.windowToken, 0)
-    }
-    val sendKbd: () -> Unit = {
-        val t = kbdText.trim()
-        if (t.isNotEmpty()) {
-            kbdText = ""
-            typing = false
-            vscreenUserInput(owner) { id ->
-                runCatching { VScreenTyping.typeText(id, t, append = true) }
-                    .exceptionOrNull()?.let { e ->
-                        mainHandler.post {
-                            Toast.makeText(context, tr("没输进去：${e.message?.take(60)}", "Not typed: ${e.message?.take(60)}"), Toast.LENGTH_SHORT).show()
-                        }
-                    }
-            }
-        }
+    // The keyboard bridge closes when the user hands the screen back or leaves the screen tab.
+    LaunchedEffect(mode, tab) {
+        if (mode != Mode.TAKEOVER || tab != TermTab.SCREEN) Overlay.closeImeBridge()
     }
     val title = s.agentTitle ?: when (mode) {
         Mode.ACTING -> s.action?.take(18) ?: Palette.word(mode)
@@ -880,7 +882,7 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                     .onGloballyPositioned { c -> val b = c.boundsInRoot(); Overlay.frameRect.set(b.left, b.top, b.right, b.bottom) },
             ) {
                 if (tab == TermTab.TERMINAL) {
-                    TerminalView(k, termLog) { c -> scope.launch(Dispatchers.IO) { VScreenTerminal.run(c) } }
+                    TerminalView(k, termLog)
                 } else if (picture != null) picture(owner) else VScreenLiveFrame(owner, Modifier.fillMaxSize(), interactive = false)
                 // A soft scrim under the pill and buttons keeps them readable on white pages.
                 Box(Modifier.fillMaxWidth().height((44 * k).dp).background(Brush.verticalGradient(listOf(Color(0x99000000), Color.Transparent))))
@@ -963,44 +965,6 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                 }
             }
 
-            // Keyboard, while you hold the screen (screen tab only; the terminal tab has its own command line).
-            if (mode == Mode.TAKEOVER && tab == TermTab.SCREEN) {
-                Row(
-                    Modifier.align(Alignment.BottomEnd).padding(end = (8 * k).dp, bottom = (8 * k).dp).control("kbd")
-                        .clip(RoundedCornerShape(50)).background(if (typing) Palette.brandA else Color(0xCC12141C)).clickable { typing = !typing }
-                        .padding(horizontal = (10 * k).dp, vertical = (5 * k).dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(tr("键盘", "Keyboard"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            // Typing row: what you type goes into the focused input box on the background screen.
-            if (typing && mode == Mode.TAKEOVER && tab == TermTab.SCREEN) {
-                Row(
-                    Modifier.align(Alignment.TopCenter).fillMaxWidth()
-                        .padding(start = (8 * k).dp, end = (8 * k).dp, top = (48 * k).dp)
-                        .clip(RoundedCornerShape(24.dp)).background(Color(0xFF1B1E2A))
-                        .padding(start = (12 * k).dp, end = (6 * k).dp, top = (6 * k).dp, bottom = (6 * k).dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.weight(1f)) {
-                        if (kbdText.isEmpty()) Text(tr("输入到副屏里有焦点的输入框", "Types into the focused input box on the screen"), color = Color(0x88FFFFFF), fontSize = (12 * k).sp)
-                        BasicTextField(kbdText, { kbdText = it }, Modifier.fillMaxWidth().control("kbdInput"), singleLine = true,
-                            textStyle = TextStyle(color = Color.White, fontSize = (12 * k).sp),
-                            cursorBrush = SolidColor(Palette.standby),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                            keyboardActions = KeyboardActions(onSend = { sendKbd() }))
-                    }
-                    Spacer(Modifier.width((6 * k).dp))
-                    Text(tr("发送", "Send"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.control("kbdSend").clip(RoundedCornerShape(50)).background(Palette.brandA)
-                            .clickable { sendKbd() }.padding(horizontal = (10 * k).dp, vertical = (5 * k).dp))
-                    Spacer(Modifier.width((4 * k).dp))
-                    RoundBtn(Icons.Filled.Close, tr("关闭输入", "Close input"), Color(0x22FFFFFF), k, "kbdClose") { typing = false }
-                }
-            }
-
             // Messages: gesture hints.
             var now by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
             LaunchedEffect(Overlay.hintAt.longValue) { now = SystemClock.uptimeMillis(); delay(3100); now = SystemClock.uptimeMillis() }
@@ -1053,16 +1017,14 @@ private fun PillBtn(text: String, bg: Color, fg: Color, k: Float, key: String, o
 private enum class TermTab { SCREEN, TERMINAL }
 
 /**
- * The terminal page of the floating window (Fluid Cloud): every `vscreen shell` run and every command typed here,
- * in full — command, stdout, stderr, exit code — newest at the bottom, with a command line of its own.
+ * The terminal page of the floating window (Fluid Cloud): every `vscreen shell` run, in full — command, stdout,
+ * stderr, exit code — newest at the bottom. Read-only: commands are run by the agent, not typed here.
  *
- * The log area is registered as a control, so dragging there scrolls the log instead of injecting into the screen;
- * the window is still moved by its title pill. The input row sits above the bottom pills (Stop / Hand back /
- * Take over), which stay visible and tappable.
+ * The log area is registered as a control and as a scroll region, so dragging there scrolls the log instead of
+ * injecting into the screen or moving the window; the window is still moved by its title pill.
  */
 @Composable
-private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>, onRun: (String) -> Unit) {
-    var cmd by remember { mutableStateOf("") }
+private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
     val listState = rememberLazyListState()
     // Auto-scroll to the bottom on new output, but only when the user was already near the bottom (reading old
     // output must not be yanked away).
@@ -1087,39 +1049,13 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>, onRun: 
         Spacer(Modifier.height((6 * k).dp))
         if (entries.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(tr("还没有跑过命令\n用 vscreen shell 跑，或在下面输入", "No commands run yet\nrun one with vscreen shell, or type below"),
+                Text(tr("还没有跑过命令\n用 vscreen shell 跑", "No commands run yet\nrun one with vscreen shell"),
                     color = Color(0x88FFFFFF), fontSize = (11 * k).sp, lineHeight = (15 * k).sp)
             }
         } else {
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().control("termLog")) {
+            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().control("termLog").scrollControl("termLog")) {
                 items(entries, key = { it.id }) { e -> TerminalEntryView(e, k) }
             }
-        }
-        Spacer(Modifier.height((6 * k).dp))
-        Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xFF1B1E2A))
-                .padding(start = (10 * k).dp, end = (4 * k).dp, top = (4 * k).dp, bottom = (4 * k).dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("$", color = Color(0xFF7CC8FF), fontSize = (13 * k).sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.width((6 * k).dp))
-            Box(Modifier.weight(1f)) {
-                if (cmd.isEmpty()) Text(tr("输入 shell 命令", "Type a shell command"), color = Color(0x88FFFFFF), fontSize = (12 * k).sp)
-                BasicTextField(cmd, { cmd = it }, Modifier.fillMaxWidth().control("termInput"), singleLine = true,
-                    textStyle = TextStyle(color = Color.White, fontSize = (12 * k).sp, fontFamily = FontFamily.Monospace),
-                    cursorBrush = SolidColor(Palette.standby),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = {
-                        val c = cmd.trim()
-                        if (c.isNotEmpty()) { cmd = ""; onRun(c) }
-                    }))
-            }
-            Text(tr("运行", "Run"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.control("termRun").clip(RoundedCornerShape(50)).background(Palette.brandA)
-                    .clickable {
-                        val c = cmd.trim()
-                        if (c.isNotEmpty()) { cmd = ""; onRun(c) }
-                    }.padding(horizontal = (10 * k).dp, vertical = (5 * k).dp))
         }
     }
 }
