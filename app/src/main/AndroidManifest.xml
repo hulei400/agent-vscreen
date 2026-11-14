@@ -90,6 +90,14 @@
             </intent-filter>
         </receiver>
 
+        <!-- LSPosed module declaration: this APK is both the Agent-VScreen
+             app and the launch-guard module. Enable it in LSPosed Manager
+             with the System Framework scope, then reboot once. -->
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="启动保护：应用已在副屏上时，在主屏新开一份，不打扰副屏那份。" />
+        <meta-data android:name="xposedminversion" android:value="82" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
