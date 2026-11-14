@@ -89,12 +89,31 @@ internal object VScreenHandoff {
         return false
     }
 
+    /**
+     * After a task was moved to the main screen: when the source screen is now empty, release it
+     * right away instead of leaving the picture on the last (now dead) frame. The screen's
+     * ImageReader gets no new frames once its app is gone, so the floating window / full screen
+     * would keep showing the frozen last picture of the moved app forever (until the idle timer
+     * released the screen minutes later). The virtual screen handles the same situation the same
+     * way: when its hosted app leaves the display it clears the frame and reports
+     * APP_MOVED_TO_PHONE instead of showing a stale picture. A deliberate move to the main
+     * screen is NOT pulled back — the user asked for the app there; only the empty screen goes.
+     * Only the empty case releases: if another app is still on the screen it keeps drawing, and
+     * the screen stays.
+     */
+    fun releaseEmptyScreen(sessionId: String, displayId: Int) {
+        if (BackgroundOperation.state.value.ownerSessionId != sessionId) return
+        if (runCatching { tasksOn(displayId) }.getOrDefault(emptyList()).isNotEmpty()) return
+        BackgroundOperation.releaseNow(sessionId)
+    }
+
     /** The user's own button (full-screen view): put the app on the background screen in front of them. */
     fun userToMain(sessionId: String): Pair<Boolean, String> {
         val d = BackgroundOperation.previewDisplayFor(sessionId) ?: return false to tr("副屏已经不在了", "The screen is gone")
         val pkg = VScreenShell.topPackage(d.displayId) ?: return false to tr("副屏上没有应用", "No app on the screen")
         val task = VScreenShell.taskIdOn(d.displayId, pkg) ?: return false to tr("找不到 $pkg 在副屏上的任务", "Cannot find $pkg's task on the screen")
         val m = move(task, pkg, 0)
+        if (m.ok) releaseEmptyScreen(sessionId, d.displayId)
         return if (m.ok) true to tr("已把 $pkg 原样移到主屏", "Moved $pkg to the main screen as it was") else false to tr("系统不允许移到主屏（${m.detail.take(120)}），请用“接管”在这里操作", "The system does not allow moving it to the main screen (${m.detail.take(120)}); use \"Take over\" to operate it here")
     }
 

@@ -201,6 +201,9 @@ private fun VScreenOffloadHandler.handoffOut(sid: String, pkgArg: String?, msg: 
     return BackgroundOperation.agentAction(sid, null, isRead = false, describe = tr("交还：把副屏的 $pkg 移到主屏", "Hand back: move $pkg from the background screen to the main screen")) { _ ->
         val m = VScreenHandoff.move(task, pkg, 0)
         if (!m.ok) throw ActionError("HANDOFF_DENIED", tr("系统没有让 $pkg 移回主屏（${m.detail}）。替代：请用户点副屏悬浮窗 › 全屏 › 接管，自己完成这一步", "The system did not move $pkg back to the main screen (${m.detail}). Instead: ask the user to tap the floating window › Full screen › Take over and do the step themselves"))
+        // The moved app is gone from the screen: if nothing is left on it, release it now, or the
+        // floating window / full screen would keep showing its last (now dead) frame.
+        VScreenHandoff.releaseEmptyScreen(sid, d0.displayId)
         val label = runCatching { context.packageManager.getApplicationInfo(pkg, 0).loadLabel(context.packageManager).toString() }.getOrDefault(pkg)
         val notified = VScreenHandoff.alert(context, 7290, tr("$label 已交给你", "$label is yours now"), msg ?: tr("Agent 把 $label 停在当前页面交给你，请在主屏继续", "The agent left $label on the current page for you; carry on on the main screen"))
         text(run { val top = VScreenShell.topPackage(0) ?: "?"; tr("$pkg 已移到主屏最前面（${m.via}），停在交还时的页面；主屏现在是 $top。", "$pkg is now in front on the main screen (${m.via}), on the page it was handed back on; the main screen shows $top. ") } +
