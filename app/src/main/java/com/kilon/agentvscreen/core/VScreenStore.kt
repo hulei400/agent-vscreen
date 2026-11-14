@@ -18,6 +18,8 @@ import org.json.JSONObject
  *      ask      = the agent may act in it only after the user allowed it on the phone (per stretch, valid 5 minutes)
  * What the agent writes down about an app (notes, saved segments, profile) is in [VScreenMap].
  *  - Idle power saving switch.
+ *  - Screen-off keep switch (v1.3 fork): keep the background screen awake
+ *    while the phone is locked, instead of only waking it on demand.
  *
  * Everything lives in the app's private storage (files/vscreen + prefs), never in the chat sandbox.
  */
@@ -26,6 +28,7 @@ internal object VScreenStore {
     private const val PREFS = "vscreen_store"
     private const val K_RULES = "app_rules"
     private const val K_IDLE_SAVE = "idle_power_save"
+    private const val K_SCREEN_OFF_KEEP = "screen_off_keep"
 
     enum class Rule(val key: String, private val zhText: String, private val enText: String) {
         BLOCK("block", "禁止操作", "blocked"), READONLY("readonly", "只读", "read-only"),
@@ -45,6 +48,10 @@ internal object VScreenStore {
     private val _idlePowerSave = MutableStateFlow(true)
     val idlePowerSave: StateFlow<Boolean> = _idlePowerSave.asStateFlow()
 
+    private val _screenOffKeep = MutableStateFlow(true)
+    /** Whether the background screen stays awake while the phone is locked. Default on. */
+    val screenOffKeep: StateFlow<Boolean> = _screenOffKeep.asStateFlow()
+
     fun init(context: Context) {
         if (appContext != null) return
         appContext = context.applicationContext
@@ -54,6 +61,7 @@ internal object VScreenStore {
             o.keys().asSequence().mapNotNull { k -> Rule.of(o.optString(k))?.let { k to it } }.toMap()
         }.getOrDefault(emptyMap())
         _idlePowerSave.value = prefs.getBoolean(K_IDLE_SAVE, true)
+        _screenOffKeep.value = prefs.getBoolean(K_SCREEN_OFF_KEEP, true)
     }
 
     private fun ready() = appContext != null
@@ -76,6 +84,13 @@ internal object VScreenStore {
         if (!ready()) return
         _idlePowerSave.value = on
         prefs.edit().putBoolean(K_IDLE_SAVE, on).apply()
+    }
+
+    /** Only the settings screen calls this: the agent cannot change its own limits. */
+    fun setScreenOffKeep(on: Boolean) {
+        if (!ready()) return
+        _screenOffKeep.value = on
+        prefs.edit().putBoolean(K_SCREEN_OFF_KEEP, on).apply()
     }
 
     /** File-name-safe key; keeps Chinese, letters, digits, '-', '_' and '.'. */
