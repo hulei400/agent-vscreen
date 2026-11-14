@@ -579,12 +579,11 @@ object Overlay {
 
     internal fun openFull() {
         val c = ctx ?: return
-        // The full-screen page only draws the background screen: with no session and no display it
-        // kills itself at once (displayId == null -> finish()), so starting it only makes the
-        // window blink out and back. The button is already hidden with no screen; this is the
-        // second line of defence for any other caller.
+        // The full-screen page works with no background screen too (it shows the terminal and its
+        // history then, and picks the screen up when an app is launched), so only a missing
+        // session stops it.
         val s = BackgroundOperation.state.value
-        if (s.ownerSessionId == null || s.displayId == null) return
+        if (s.ownerSessionId == null) return
         runCatching { c.startActivity(Intent(c, FullscreenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
 
@@ -955,19 +954,18 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             }
 
             // Buttons, top right: terminal tab, full screen, close. Same places in every state.
-            // No screen: there is only the terminal page, so the tab toggle is hidden — and so is full
-            // screen. The full-screen page only draws the background screen: with no display it
-            // kills itself at once (displayId == null -> finish()), so tapping it only made the
-            // window blink out and back.
+            // No screen: there is only the terminal page, so the tab toggle is hidden — but full
+            // screen stays: the full-screen page shows the terminal and its history when there
+            // is no background screen yet.
             Row(Modifier.align(Alignment.TopEnd).padding(end = (6 * k).dp, top = (6 * k).dp)) {
                 if (owner != null) {
                     PillBtn(if (tab == TermTab.TERMINAL) tr("画面", "Screen") else tr("终端", "Terminal"), Color(0xCC12141C), Color.White, k, "termTab") {
                         tab = if (tab == TermTab.TERMINAL) TermTab.SCREEN else TermTab.TERMINAL
                     }
                     Spacer(Modifier.width((5 * k).dp))
-                    RoundBtn(Icons.Filled.OpenInFull, tr("全屏", "Full screen"), Color(0xCC12141C), k, "full") { Overlay.openFull() }
-                    Spacer(Modifier.width((5 * k).dp))
                 }
+                RoundBtn(Icons.Filled.OpenInFull, tr("全屏", "Full screen"), Color(0xCC12141C), k, "full") { Overlay.openFull() }
+                Spacer(Modifier.width((5 * k).dp))
                 RoundBtn(Icons.Filled.Close, if (mode == Mode.ACTING || mode == Mode.STANDBY || mode == Mode.TAKEOVER) tr("收起小窗", "Hide window") else tr("关闭副屏", "Close screen"),
                     Color(0xCC12141C), k, "close") { Overlay.closeTapped() }
             }
@@ -1128,7 +1126,7 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
  * short buzz, and a "已复制" toast confirms; a tap does nothing, so scrolling never copies by accident.
  */
 @Composable
-private fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float) {
+internal fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float) {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxWidth().padding(vertical = (4 * k).dp)) {
         Text("$ " + e.command, color = Color(0xFF7CC8FF), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp,
