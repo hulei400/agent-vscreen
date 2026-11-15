@@ -17,9 +17,9 @@ import java.io.File
  * [append]/[clear] 失败都静默，绝不影响命令本身。
  */
 object VScreenTerminalHistory {
-    /** 最多留几条（再多就 50 条一批删最旧的，摊掉重写文件的开销）。 */
-    const val MAX_ENTRIES = 200
-    private const val TRIM_SLACK = 50
+    /** 最多留几条（再多就 100 条一批删最旧的，摊掉重写文件的开销）。 */
+    const val MAX_ENTRIES = 500
+    private const val TRIM_SLACK = 100
     /** 历史里每路输出最多留多少字（防文件无限长；命令全文不受影响）。 */
     const val MAX_OUTPUT_CHARS = 64 * 1024
     private const val FILE_NAME = "terminal-history.jsonl"
