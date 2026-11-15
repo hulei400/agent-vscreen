@@ -1097,12 +1097,16 @@ private fun PillBtn(text: String, bg: Color, fg: Color, k: Float, key: String, o
 private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
     val s by BackgroundOperation.state.collectAsState()
     val autoScroll = s.termAutoscroll
+    val autoPop = s.termAutopop
     // r38: 开关开着时打开页面就停在最下面（initialFirstVisibleItemIndex）；关着时从最上面开始。
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = if (autoScroll && entries.isNotEmpty()) entries.size - 1 else 0)
     // r38: 开关开着时，每来一条新命令就直接滚到底部，不再判断“是否已在底部附近”。
     // 开关打开的瞬间也会滚到底部；关着时不自动滚，由用户手动滑。
-    LaunchedEffect(entries.size, autoScroll) {
+    // r43: key 不能是 entries.size——内存日志满 50 条后 size 永远停在 50，key 不变、effect
+    // 不再触发，跑多了命令就不滚了（用户就是这么碰上的）。改成最新一条的单调 id
+    // （Entry.nextId 每条新命令 +1，满了顶掉旧条也照样变），满 50 条后照样滚到底部。
+    LaunchedEffect(entries.lastOrNull()?.id, autoScroll) {
         if (entries.isEmpty() || !autoScroll) return@LaunchedEffect
         listState.scrollToItem(entries.size - 1)
     }
@@ -1116,6 +1120,16 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
             Text(tr("KernelSU root · uid 0", "KernelSU root · uid 0"), color = Color(0x88FFFFFF), fontSize = (10 * k).sp)
             // r40: “长按命令复制”这段提示直接删掉（全屏页里已经有这句，浮窗上不用重复），腾出来的地方给开关。
             Spacer(Modifier.weight(1f))
+            // r43: 自动弹副屏开关（光秃秃的开关，无文字；跟自动滚动那颗一个样式、一个尺寸；
+            // 开=蓝底，关=灰底；点一下切换）。放在自动滚动开关左边。
+            Box(Modifier.control("termAutopop")
+                .size(width = maxOf((38 * k).dp, 32.dp), height = maxOf((22 * k).dp, 20.dp))
+                .clip(RoundedCornerShape(50)).background(if (autoPop) Color(0xFF7CC8FF) else Color(0x44FFFFFF))
+                .clickable { BackgroundOperation.setTermAutopop(!autoPop) }.padding(2.dp),
+                contentAlignment = if (autoPop) Alignment.CenterEnd else Alignment.CenterStart) {
+                Box(Modifier.size(maxOf((18 * k).dp, 16.dp)).clip(CircleShape).background(Color.White))
+            }
+            Spacer(Modifier.width((6 * k).dp))
             // r40: 自动滚到底部开关（光秃秃的开关，无文字；开=蓝底，关=灰底；点一下切换）。
             // 最小状态（k=0.75）下尺寸不跟 k 一起缩到看不见：至少 32×20dp，圆点至少 16dp，顶栏再挤也一眼能看见、手指点得准。
             Box(Modifier.control("termAutoscroll")

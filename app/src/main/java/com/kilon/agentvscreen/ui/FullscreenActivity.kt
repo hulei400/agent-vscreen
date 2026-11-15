@@ -321,12 +321,15 @@ class FullscreenActivity : ComponentActivity() {
 private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
     val s by BackgroundOperation.state.collectAsState()
     val autoScroll = s.termAutoscroll
+    val autoPop = s.termAutopop
     // r38: 开关开着时打开页面就停在最下面（initialFirstVisibleItemIndex）；关着时从最上面开始。
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = if (autoScroll && entries.isNotEmpty()) entries.size - 1 else 0)
     // r38: 开关开着时，每来一条新命令就直接滚到底部，不再判断“是否已在底部附近”。
     // 开关打开的瞬间也会滚到底部；关着时不自动滚，由用户手动滑。
-    LaunchedEffect(entries.size, autoScroll) {
+    // r43: key 不能是 entries.size——内存日志满 50 条后 size 永远停在 50，key 不变、effect
+    // 不再触发，跑多了命令就不滚了。改成最新一条的单调 id，每条新命令都会变，满了也照样滚。
+    LaunchedEffect(entries.lastOrNull()?.id, autoScroll) {
         if (entries.isEmpty() || !autoScroll) return@LaunchedEffect
         listState.scrollToItem(entries.size - 1)
     }
@@ -337,6 +340,19 @@ private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
             Spacer(Modifier.width(6.dp))
             Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = 12.sp)
             Spacer(Modifier.weight(1f))
+            // r43: 自动弹副屏开关（光开关+旁边“弹屏”二字，样式跟“滚动”那颗一致；开=蓝底，关=灰底；
+            // 点一下切换；开关本身固定尺寸不缩）。放在“滚动”那颗左边。
+            Box(Modifier.size(width = 44.dp, height = 26.dp)
+                .clip(RoundedCornerShape(50)).background(if (autoPop) Color(0xFF7CC8FF) else Color(0x44FFFFFF))
+                .clickable { BackgroundOperation.setTermAutopop(!autoPop) }.padding(3.dp),
+                contentAlignment = if (autoPop) Alignment.CenterEnd else Alignment.CenterStart) {
+                Box(Modifier.size(20.dp).clip(CircleShape).background(Color.White))
+            }
+            Spacer(Modifier.width(6.dp))
+            Text(tr("弹屏", "Auto-pop"),
+                color = if (autoPop) Color(0xFF7CC8FF) else Color(0x66FFFFFF), fontSize = 15.sp,
+                modifier = Modifier.clickable { BackgroundOperation.setTermAutopop(!autoPop) })
+            Spacer(Modifier.width(6.dp))
             // r40: 自动滚到底部开关（光开关+旁边“滚动”二字，样式跟浮窗一致；开=蓝底，关=灰底；点一下切换；开关本身固定尺寸不缩）。
             Box(Modifier.size(width = 44.dp, height = 26.dp)
                 .clip(RoundedCornerShape(50)).background(if (autoScroll) Color(0xFF7CC8FF) else Color(0x44FFFFFF))
