@@ -120,6 +120,9 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * The floating window over every app (a system overlay), so the user sees the background screen whatever agent app is
@@ -1132,6 +1135,10 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
     }
 }
 
+// 终端条目跑完的时间，和历史页 formatTime 同格式（MM-dd HH:mm:ss），不再显示耗时毫秒。
+private fun formatTime(ms: Long): String =
+    SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(ms))
+
 /**
  * One terminal record: full text, nothing cut off (no maxLines anywhere). Long-press the command line to copy
  * the command (not the output) to the clipboard — combinedClickable's built-in long-press haptic gives one
@@ -1162,10 +1169,10 @@ internal fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float, collapsible: 
             if (e.stderr.isNotEmpty()) Text(e.stderr.trimEnd('\n'), color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = (11 * k).sp)
         }
         if (e.exitCode != 0) Text(
-            if (e.timedOut) tr("⏱ 超时，已终止（退出码 124，用时 ${e.durationMs}ms）", "⏱ timed out, killed (exit 124, ${e.durationMs} ms)")
-            else tr("退出码 ${e.exitCode}（用时 ${e.durationMs}ms）", "exit ${e.exitCode} (${e.durationMs} ms)"),
+            if (e.timedOut) tr("⏱ 超时，已终止（退出码 124，${formatTime(e.atMs)}）", "⏱ timed out, killed (exit 124, ${formatTime(e.atMs)})")
+            else tr("退出码 ${e.exitCode}（${formatTime(e.atMs)}）", "exit ${e.exitCode} (${formatTime(e.atMs)})"),
             color = Color(0xFFFFB347), fontSize = (10 * k).sp)
-        else if (collapsible) Text(tr("✓ 退出码 0（用时 ${e.durationMs}ms）", "✓ exit 0 (${e.durationMs} ms)"),
+        else if (collapsible) Text(tr("✓ 退出码 0（${formatTime(e.atMs)}）", "✓ exit 0 (${formatTime(e.atMs)})"),
             color = Color(0xFF8FD694), fontSize = (10 * k).sp)
         if (collapsible && hasOutput) {
             val lines = (e.stdout + e.stderr).trimEnd('\n').lines().size
