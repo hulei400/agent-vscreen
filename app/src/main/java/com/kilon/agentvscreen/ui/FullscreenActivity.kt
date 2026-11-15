@@ -332,8 +332,7 @@ private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
     }
     Column(Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color(0xFF0B0D14)).padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(tr("终端", "Terminal"), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.width(6.dp))
+            // r40: 头上的“终端”二字删掉（最顶层标题栏没有副屏时已经显示“终端”，这里不用重复）；其余不动。
             Text(tr("KernelSU root · uid 0", "KernelSU root · uid 0"), color = Color(0x88FFFFFF), fontSize = 12.sp)
             Spacer(Modifier.width(6.dp))
             Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = 12.sp)
