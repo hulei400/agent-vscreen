@@ -153,8 +153,6 @@ private fun HistoryEntryItem(e: VScreenTerminal.Entry) {
                 else if (e.timedOut) tr("⏱ 超时 124", "⏱ timed out 124")
                 else tr("退出码 ${e.exitCode}", "exit ${e.exitCode}"),
                 color = if (e.exitCode == 0) Color(0xFF7ED07E) else Color(0xFFFFB347), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Text(tr("${e.durationMs}ms", "${e.durationMs} ms"), color = Color(0x88FFFFFF), fontSize = 12.sp)
         }
         Spacer(Modifier.height(6.dp))
         Text("$ " + e.command, color = Color(0xFF7CC8FF), fontFamily = FontFamily.Monospace, fontSize = 14.sp)
