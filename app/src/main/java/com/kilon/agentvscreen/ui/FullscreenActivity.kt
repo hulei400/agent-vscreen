@@ -348,10 +348,7 @@ private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
             Text(tr("滚动", "Auto-scroll"),
                 color = if (autoScroll) Color(0xFF7CC8FF) else Color(0x66FFFFFF), fontSize = 15.sp,
                 modifier = Modifier.clickable { BackgroundOperation.setTermAutoscroll(!autoScroll) })
-            Spacer(Modifier.width(6.dp))
-            Text(tr("清空", "Clear"), color = Color(0xFF7CC8FF), fontSize = 13.sp,
-                modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x22FFFFFF))
-                    .clickable { VScreenTerminal.clear() }.padding(horizontal = 10.dp, vertical = 4.dp))
+            // r41: “清空”删掉（用户要两边都没有；VScreenTerminal.clear() 本身还在，shell --clear 照常清日志）。
         }
         Spacer(Modifier.height(8.dp))
         if (entries.isEmpty()) {
