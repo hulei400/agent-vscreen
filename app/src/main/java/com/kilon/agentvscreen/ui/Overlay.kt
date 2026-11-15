@@ -1172,7 +1172,7 @@ internal fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float, collapsible: 
             if (e.timedOut) tr("⏱ 超时，已终止（退出码 124，${formatTime(e.atMs)}）", "⏱ timed out, killed (exit 124, ${formatTime(e.atMs)})")
             else tr("退出码 ${e.exitCode}（${formatTime(e.atMs)}）", "exit ${e.exitCode} (${formatTime(e.atMs)})"),
             color = Color(0xFFFFB347), fontSize = (10 * k).sp)
-        else if (collapsible) Text(tr("✓ 退出码 0（${formatTime(e.atMs)}）", "✓ exit 0 (${formatTime(e.atMs)})"),
+        else Text(tr("✓ 退出码 0（${formatTime(e.atMs)}）", "✓ exit 0 (${formatTime(e.atMs)})"),
             color = Color(0xFF8FD694), fontSize = (10 * k).sp)
         if (collapsible && hasOutput) {
             val lines = (e.stdout + e.stderr).trimEnd('\n').lines().size
