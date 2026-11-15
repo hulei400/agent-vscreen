@@ -98,14 +98,28 @@ object VScreenTerminal {
     private fun drainThread(input: java.io.InputStream, sink: java.io.ByteArrayOutputStream): Thread {
         val limit = MAX_OUTPUT_CHARS + 1
         return Thread {
-            input.use { stream ->
-                val buf = ByteArray(4096)
-                while (true) {
-                    val n = stream.read(buf)
-                    if (n < 0) break
-                    val room = limit - sink.size()
-                    if (room > 0) sink.write(buf, 0, minOf(n, room))
+            // r42: 读流时另一条线程关了流（命令跑完、超时被杀、进程被销毁都会关流），
+            // read() 会抛 InterruptedIOException——这是正常结束，不是错误。
+            // 之前没接这个异常，它一路抛到线程顶、杀死整个 App 进程（前台服务、
+            // ApiServer、Tailscale 内网、无障碍全跟着死），就是服务老冻住的根因
+            // （dropbox 里的 crash 全是这一个异常）。现在接住当流正常结束，
+            // 安静退出线程，不记错、不影响退出码和输出内容。
+            try {
+                input.use { stream ->
+                    val buf = ByteArray(4096)
+                    while (true) {
+                        val n = try {
+                            stream.read(buf)
+                        } catch (e: java.io.IOException) {
+                            break
+                        }
+                        if (n < 0) break
+                        val room = limit - sink.size()
+                        if (room > 0) sink.write(buf, 0, minOf(n, room))
+                    }
                 }
+            } catch (e: java.io.IOException) {
+                // 关流时抛也一样，正常结束。
             }
         }.apply { isDaemon = true; start() }
     }
