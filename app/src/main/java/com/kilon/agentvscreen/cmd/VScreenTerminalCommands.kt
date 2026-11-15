@@ -30,13 +30,16 @@ internal fun VScreenOffloadHandler.shellCmd(
     if (e.notReady) return err("NOT_CONNECTED",
         tr("root 没就绪，命令没有跑：${e.stderr}。请用户打开 Agent-VScreen，点允许 KernelSU 的 root 授权。",
             "Root is not ready, the command did not run: ${e.stderr}. Ask the user to open Agent-VScreen and allow the KernelSU root authorization."))
+    // 跑完的时间（MM-dd HH:mm:ss，和历史页 formatTime 同格式），不再显示耗时毫秒。
+    // 注：本文件 logText 里已有同名 fmt（HH:mm:ss），这里另起一个，两个各用各的。
+    val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
     val body = buildString {
         append("$ ").append(e.command).append('\n')
         if (e.stdout.isNotEmpty()) append(e.stdout.trimEnd('\n')).append('\n')
         if (e.stderr.isNotEmpty()) append(e.stderr.trimEnd('\n')).append('\n')
         if (e.exitCode != 0) {
             if (e.timedOut) append(tr("⏱ 超时：${timeoutMs / 1000} 秒内没跑完，已终止（退出码 124）", "⏱ timed out: did not finish in ${timeoutMs / 1000} s, killed (exit code 124)"))
-            else append(tr("退出码 ${e.exitCode}（用时 ${e.durationMs}ms）", "exit code ${e.exitCode} (${e.durationMs} ms)"))
+            else append(tr("退出码 ${e.exitCode}（${fmt.format(Date(e.atMs))}）", "exit code ${e.exitCode} (${fmt.format(Date(e.atMs))})"))
             append('\n')
         }
     }
