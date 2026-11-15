@@ -339,7 +339,7 @@ private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
             Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = 12.sp)
             Spacer(Modifier.weight(1f))
             // r38: 自动滚到底部开关（小药丸，同“清空”一样高，点一下切换；开=蓝字带 ✓，关=灰字）。
-            Text(if (autoScroll) tr("自动滚 ✓", "Auto-scroll ✓") else tr("自动滚", "Auto-scroll"),
+            Text(if (autoScroll) tr("滚动 ✓", "Auto-scroll ✓") else tr("滚动", "Auto-scroll"),
                 color = if (autoScroll) Color(0xFF7CC8FF) else Color(0x66FFFFFF), fontSize = 13.sp,
                 modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x22FFFFFF))
                     .clickable { BackgroundOperation.setTermAutoscroll(!autoScroll) }.padding(horizontal = 10.dp, vertical = 4.dp))
