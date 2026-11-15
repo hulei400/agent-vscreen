@@ -1117,12 +1117,12 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
             Spacer(Modifier.width((6 * k).dp))
             Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = (10 * k).sp)
             Spacer(Modifier.weight(1f))
-            // r39: 自动滚到底部开关（光秃秃的迷你开关，无文字；开=蓝底，关=灰底；点一下切换）。
-            Box(Modifier.control("termAutoscroll").size(width = (28 * k).dp, height = (16 * k).dp)
+            // r39: 自动滚到底部开关（光秃秃的开关，无文字；开=蓝底，关=灰底；点一下切换；尺寸跟“清空”差不多大，手指能点准）。
+            Box(Modifier.control("termAutoscroll").size(width = (38 * k).dp, height = (22 * k).dp)
                 .clip(RoundedCornerShape(50)).background(if (autoScroll) Color(0xFF7CC8FF) else Color(0x44FFFFFF))
                 .clickable { BackgroundOperation.setTermAutoscroll(!autoScroll) }.padding((2 * k).dp),
                 contentAlignment = if (autoScroll) Alignment.CenterEnd else Alignment.CenterStart) {
-                Box(Modifier.size((12 * k).dp).clip(CircleShape).background(Color.White))
+                Box(Modifier.size((18 * k).dp).clip(CircleShape).background(Color.White))
             }
             Spacer(Modifier.width((6 * k).dp))
             Text(tr("清空", "Clear"), color = Color(0xFF7CC8FF), fontSize = (11 * k).sp,
