@@ -1114,11 +1114,7 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
             Text(tr("终端", "Terminal"), color = Color.White, fontSize = (12 * k).sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width((6 * k).dp))
             Text(tr("KernelSU root · uid 0", "KernelSU root · uid 0"), color = Color(0x88FFFFFF), fontSize = (10 * k).sp)
-            // r40: 窗口缩到最小（k<=0.8）时藏掉“长按命令复制”这段提示，给开关让路；“终端”和“KernelSU root · uid 0”不动。
-            if (k > 0.8f) {
-                Spacer(Modifier.width((6 * k).dp))
-                Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = (10 * k).sp)
-            }
+            // r40: “长按命令复制”这段提示直接删掉（全屏页里已经有这句，浮窗上不用重复），腾出来的地方给开关。
             Spacer(Modifier.weight(1f))
             // r40: 自动滚到底部开关（光秃秃的开关，无文字；开=蓝底，关=灰底；点一下切换）。
             // 最小状态（k=0.75）下尺寸不跟 k 一起缩到看不见：至少 32×20dp，圆点至少 16dp，顶栏再挤也一眼能看见、手指点得准。
