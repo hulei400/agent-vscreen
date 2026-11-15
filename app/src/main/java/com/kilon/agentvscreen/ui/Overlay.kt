@@ -1095,13 +1095,16 @@ private fun PillBtn(text: String, bg: Color, fg: Color, k: Float, key: String, o
  */
 @Composable
 private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
-    val listState = rememberLazyListState()
-    // Auto-scroll to the bottom on new output, but only when the user was already near the bottom (reading old
-    // output must not be yanked away).
-    LaunchedEffect(entries.size) {
-        if (entries.isEmpty()) return@LaunchedEffect
-        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
-        if (last == null || last >= entries.size - 2) listState.scrollToItem(entries.size - 1)
+    val s by BackgroundOperation.state.collectAsState()
+    val autoScroll = s.termAutoscroll
+    // r38: 开关开着时打开页面就停在最下面（initialFirstVisibleItemIndex）；关着时从最上面开始。
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = if (autoScroll && entries.isNotEmpty()) entries.size - 1 else 0)
+    // r38: 开关开着时，每来一条新命令就直接滚到底部，不再判断“是否已在底部附近”。
+    // 开关打开的瞬间也会滚到底部；关着时不自动滚，由用户手动滑。
+    LaunchedEffect(entries.size, autoScroll) {
+        if (entries.isEmpty() || !autoScroll) return@LaunchedEffect
+        listState.scrollToItem(entries.size - 1)
     }
     Column(
         Modifier.fillMaxSize().background(Color(0xFF0B0D14))
@@ -1114,6 +1117,12 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
             Spacer(Modifier.width((6 * k).dp))
             Text(tr("长按命令复制", "Long-press a command to copy"), color = Color(0x66FFFFFF), fontSize = (10 * k).sp)
             Spacer(Modifier.weight(1f))
+            // r38: 自动滚到底部开关（小药丸，同“清空”一样高，点一下切换；开=蓝字带 ✓，关=灰字）。
+            Text(if (autoScroll) tr("自动滚 ✓", "Auto-scroll ✓") else tr("自动滚", "Auto-scroll"),
+                color = if (autoScroll) Color(0xFF7CC8FF) else Color(0x66FFFFFF), fontSize = (11 * k).sp,
+                modifier = Modifier.control("termAutoscroll").clip(RoundedCornerShape(50)).background(Color(0x22FFFFFF))
+                    .clickable { BackgroundOperation.setTermAutoscroll(!autoScroll) }.padding(horizontal = (8 * k).dp, vertical = (3 * k).dp))
+            Spacer(Modifier.width((6 * k).dp))
             Text(tr("清空", "Clear"), color = Color(0xFF7CC8FF), fontSize = (11 * k).sp,
                 modifier = Modifier.control("termClear").clip(RoundedCornerShape(50)).background(Color(0x22FFFFFF))
                     .clickable { VScreenTerminal.clear() }.padding(horizontal = (8 * k).dp, vertical = (3 * k).dp))

@@ -55,6 +55,7 @@ object BackgroundOperation {
     private const val K_PREVIEW = "show_preview"
     private const val K_ACCURATE_OCR = "accurate_ocr_enabled"
     private const val K_RECORDING = "recording_enabled"
+    private const val K_TERM_AUTOSCROLL = "term_autoscroll"
     private const val K_WIN_SCALE = "window_scale"
     private const val K_WIN_RIGHT = "window_right"
     private const val K_WIN_Y = "window_y_fraction"
@@ -78,6 +79,8 @@ object BackgroundOperation {
         val accurateOcr: Boolean = true,
         /** 后台录屏 (v42): keep a recording track of the background screen for `rewind` (deleted on release). */
         val recording: Boolean = true,
+        /** r38: 终端页自动滚到底部（新命令来了直接滚，打开终端页也停在最下面）。开关在终端页顶栏，默认开。 */
+        val termAutoscroll: Boolean = true,
         val connection: Connection = Connection.DISCONNECTED,
         val connectionError: String? = null,
         /** True after 停止并释放 / feature off / failure: the agent may not auto-connect. */
@@ -374,6 +377,7 @@ object BackgroundOperation {
                 showPreview = prefs.getBoolean(K_PREVIEW, true),
                 accurateOcr = prefs.getBoolean(K_ACCURATE_OCR, true),
                 recording = prefs.getBoolean(K_RECORDING, true),
+                termAutoscroll = prefs.getBoolean(K_TERM_AUTOSCROLL, true),
             )
         }
         // Tracks of a previous process belong to screens that are gone.
@@ -412,6 +416,12 @@ object BackgroundOperation {
     fun setShowPreview(on: Boolean) {
         prefs.edit().putBoolean(K_PREVIEW, on).apply()
         _state.update { it.copy(showPreview = on) }
+    }
+
+    /** r38: 终端页自动滚到底部开关（浮窗和全屏两页共用，写 prefs，重启不丢）。 */
+    fun setTermAutoscroll(on: Boolean) {
+        prefs.edit().putBoolean(K_TERM_AUTOSCROLL, on).apply()
+        _state.update { it.copy(termAutoscroll = on) }
     }
 
     /** Re-read Shizuku, accessibility and main-screen metrics. Cheap; call from UI. */
