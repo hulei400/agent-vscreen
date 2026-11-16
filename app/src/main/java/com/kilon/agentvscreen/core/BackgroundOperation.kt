@@ -428,7 +428,11 @@ object BackgroundOperation {
     /** Re-read Shizuku, accessibility and main-screen metrics. Cheap; call from UI. */
     fun refreshStatus() {
         val context = appContext ?: return
-        ShizukuManager.refresh()
+        val t0 = SystemClock.elapsedRealtime()
+        // r45: Shizuku state comes from the cache; a background thread refreshes it. The live pingBinder() used to run
+        // here (before every command dispatch) and a frozen Shizuku server blocked every command with no timeout.
+        // The cache is at most one command stale (the async refresh runs on every call and the next call reads it).
+        ShizukuManager.refreshAsync()
         val snap = ShizukuManager.snapshot.value
         val priv = when (snap.state) {
             ShizukuManager.State.READY -> Privilege.READY
@@ -457,6 +461,9 @@ object BackgroundOperation {
             next
         }
         if (_state.value.connection == Connection.ERROR && display != null) releaseScreen(tr("连接失效", "Connection lost"))
+        // r45: timing log — this is supposed to be cheap now (cache read); a slow one leaves a trace.
+        val took = SystemClock.elapsedRealtime() - t0
+        if (took > 2_000L) AppLogger.warning(TAG, "refreshStatus took ${took}ms (slow)")
     }
 
     // ── connection ─────────────────────────────────────────────────────────
