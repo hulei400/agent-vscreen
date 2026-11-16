@@ -80,7 +80,9 @@ object BackgroundOperation {
         /** 后台录屏 (v42): keep a recording track of the background screen for `rewind` (deleted on release). */
         val recording: Boolean = true,
         /** r38: 终端页自动滚到底部（新命令来了直接滚，打开终端页也停在最下面）。开关在终端页顶栏，默认开。
-         * r44: 这颗开关同时管跑命令弹不弹浮窗——关掉后命令照常跑、照常记日志，只是不弹窗、也不自动滚。 */
+         * r44: 这颗开关同时管跑命令弹不弹浮窗——关掉后命令照常跑、照常记日志，只是不弹窗、也不自动滚。
+         * r46: 开关只管“浮窗已经在上面显示着”以后的弹不弹；第一次拉起（浮窗收起/停靠/还没附加上）一定弹，
+         * 不管开关。开关关着时第一次弹起也落到底部一次（popScrollAt），之后不再自动滚。 */
         val termAutoscroll: Boolean = true,
         val connection: Connection = Connection.DISCONNECTED,
         val connectionError: String? = null,
@@ -137,6 +139,26 @@ object BackgroundOperation {
          * the two never fight over the window.
          */
         val dockRequestedAt: Long = 0L,
+        /**
+         * r46: the mirror of [dockRequested] for the other direction — a shell command's first
+         * pop wants the folded window unfolded. Set by [popTerminalWindow] only when the window
+         * is folded at pop time; consumed by the overlay when it unfolds. Needed because the
+         * pop-time effect (`LaunchedEffect(terminalPopAt)` in the overlay) only fires on a pop
+         * newer than the last one it saw, and a re-attached window starts its counter at the
+         * current pop time — without this, a first pop that re-attaches a folded window would
+         * leave it as an edge tab instead of opening the terminal page.
+         */
+        val undockRequested: Boolean = false,
+        /** Wall-clock ms when the unfold-after-pop was requested (0 = no request). */
+        val undockRequestedAt: Long = 0L,
+        /**
+         * r46: a first pop (switch OFF) wants the terminal page to land at the bottom once this
+         * command's entry arrives. Wall-clock ms of the first pop (0 = no request). The entry is
+         * only appended after the command finishes, so the overlay scrolls when the newest entry
+         * is at/after this time, then clears it — later commands do not scroll while the switch
+         * is OFF. Only set when the switch is OFF (when it is ON the auto-scroll effect does it).
+         */
+        val popScrollAt: Long = 0L,
         /** Which page the floating window and the full-screen page show (shared: a switch in either
          * place moves both). A shell command flips it to TERMINAL; a screen appearing flips it to SCREEN. */
         val page: ViewPage = ViewPage.SCREEN,
@@ -146,6 +168,15 @@ object BackgroundOperation {
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
+
+    /**
+     * r46: whether the floating window is currently folded into its edge tab. The fold state
+     * lives in the overlay (ui), which sets this once; core must not import ui (same pattern
+     * as VScreenRules.hostFactory). Read by [popTerminalWindow] to tell a first pop (window
+     * hidden / folded / not attached yet — always pop) from a later command (window already
+     * up — the scroll switch governs). Unset = not folded.
+     */
+    @Volatile var dockedProvider: (() -> Boolean)? = null
 
     @Volatile private var appContext: Context? = null
     private lateinit var prefs: SharedPreferences
@@ -419,10 +450,12 @@ object BackgroundOperation {
         _state.update { it.copy(showPreview = on) }
     }
 
-    /** r38: 终端页自动滚到底部开关（浮窗和全屏两页共用，写 prefs，重启不丢）。r44: 这颗开关同时管跑命令弹不弹浮窗。 */
+    /** r38: 终端页自动滚到底部开关（浮窗和全屏两页共用，写 prefs，重启不丢）。r44: 这颗开关同时管跑命令弹不弹浮窗。r46: 开关只管浮窗已经在上面以后的弹不弹；第一次拉起一定弹。 */
     fun setTermAutoscroll(on: Boolean) {
         prefs.edit().putBoolean(K_TERM_AUTOSCROLL, on).apply()
-        _state.update { it.copy(termAutoscroll = on) }
+        // r46: turning the switch ON makes the one-shot first-pop scroll moot (auto-scroll takes
+        // over); clear it so it cannot fire once later when the user turns the switch OFF again.
+        _state.update { it.copy(termAutoscroll = on, popScrollAt = if (on) 0L else it.popScrollAt) }
     }
 
     /** Re-read Shizuku, accessibility and main-screen metrics. Cheap; call from UI. */
@@ -729,10 +762,38 @@ object BackgroundOperation {
      * 滚动开关关着时什么都不做——不设 terminalPopAt、不清 windowHidden、不切页，命令照常跑、
      * 照常记日志，只是不弹窗、也不自动滚；开关一开，下一条命令就又弹出来了。不留时间戳，
      * 所以 round21 的 dock/terminalPopAt 仲裁也不会被误触发。
+     * r46: 开关只管“浮窗已经在上面显示着”以后的弹不弹。第一次拉起一定弹，不管开关：
+     * 浮窗当前是收起的（× 关掉了 / windowHidden）、已停靠（dockedProvider 说在边栏里）或还没
+     * 附加上（没副屏也没弹过），跑命令时一定弹出来（取消停靠、切到终端页）；开关关着时这次
+     * 弹起还落到底部一次（popScrollAt，等这条命令的记录到了再滚），之后不再自动滚。浮窗已经
+     * 在上面显示着时，开关开着才弹（强制切回终端页，r44 行为不变），关着就留在当前页
+     * （在看应用就不打扰，在终端页新命令照常记进日志）。“在上面”的判断就是浮窗自己的附着
+     * 条件（没收起、没停靠、有副屏或弹过）——停靠状态在 Overlay 里，通过 dockedProvider 读，
+     * core 不直接 import ui。
      */
     fun popTerminalWindow() {
-        if (!_state.value.termAutoscroll) return
-        _state.update { it.copy(terminalPopAt = System.currentTimeMillis(), windowHidden = false, page = ViewPage.TERMINAL) }
+        val s = _state.value
+        val docked = dockedProvider?.invoke() ?: false
+        val windowUp = !s.windowHidden && !docked && (s.displayId != null || s.terminalPopAt > 0L)
+        val now = System.currentTimeMillis()
+        if (windowUp) {
+            // Already up and visible: the scroll switch governs (r44 behavior unchanged).
+            if (!s.termAutoscroll) return
+            _state.update { it.copy(terminalPopAt = now, windowHidden = false, page = ViewPage.TERMINAL) }
+            return
+        }
+        // First pop: hidden, folded, or not attached yet — always pop, switch or no switch.
+        _state.update {
+            it.copy(
+                terminalPopAt = now, windowHidden = false, page = ViewPage.TERMINAL,
+                undockRequested = if (docked) true else it.undockRequested,
+                undockRequestedAt = if (docked) now else it.undockRequestedAt,
+                // Switch OFF: land at the bottom once this command's entry arrives. Switch ON:
+                // the auto-scroll effect already does it, so no one-shot is needed (and a stale
+                // one must not fire later — setTermAutoscroll(true) clears it).
+                popScrollAt = if (!it.termAutoscroll) now else it.popScrollAt,
+            )
+        }
     }
 
     /**
@@ -748,6 +809,16 @@ object BackgroundOperation {
     /** The fold happened, or the window was unfolded by hand / by a command: the request is spent. */
     fun clearDockRequest() {
         _state.update { if (!it.dockRequested) it else it.copy(dockRequested = false, dockRequestedAt = 0L) }
+    }
+
+    /** r46: the unfold happened: the request is spent. */
+    fun clearUndockRequest() {
+        _state.update { if (!it.undockRequested) it else it.copy(undockRequested = false, undockRequestedAt = 0L) }
+    }
+
+    /** r46: the one-shot first-pop scroll was done (or mooted): the request is spent. */
+    fun clearPopScroll() {
+        _state.update { if (it.popScrollAt == 0L) it else it.copy(popScrollAt = 0L) }
     }
 
     /** Switch the page the floating window and the full-screen page show (one shared state). */
