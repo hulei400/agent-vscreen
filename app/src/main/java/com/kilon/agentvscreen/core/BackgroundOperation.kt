@@ -762,38 +762,55 @@ object BackgroundOperation {
      * 滚动开关关着时什么都不做——不设 terminalPopAt、不清 windowHidden、不切页，命令照常跑、
      * 照常记日志，只是不弹窗、也不自动滚；开关一开，下一条命令就又弹出来了。不留时间戳，
      * 所以 round21 的 dock/terminalPopAt 仲裁也不会被误触发。
-     * r46: 开关只管“浮窗已经在上面显示着”以后的弹不弹。第一次拉起一定弹，不管开关：
-     * 浮窗当前是收起的（× 关掉了 / windowHidden）、已停靠（dockedProvider 说在边栏里）或还没
-     * 附加上（没副屏也没弹过），跑命令时一定弹出来（取消停靠、切到终端页）；开关关着时这次
-     * 弹起还落到底部一次（popScrollAt，等这条命令的记录到了再滚），之后不再自动滚。浮窗已经
-     * 在上面显示着时，开关开着才弹（强制切回终端页，r44 行为不变），关着就留在当前页
-     * （在看应用就不打扰，在终端页新命令照常记进日志）。“在上面”的判断就是浮窗自己的附着
-     * 条件（没收起、没停靠、有副屏或弹过）——停靠状态在 Overlay 里，通过 dockedProvider 读，
-     * core 不直接 import ui。
+     * r47: 三种情况，分开算（r46 把“停靠着”也算进了一定弹，是错的）：
+     * 1. 副屏关着（× 关掉了 / windowHidden）或还没附加上（没副屏也没弹过）：一定弹，
+     *    不管开关——这是任务一开始第一条命令，让用户知道开始执行了；开关关着时这次
+     *    弹起还落到底部一次（popScrollAt，等这条命令的记录到了再滚）。
+     * 2. 副屏停靠成边栏（dockedProvider 说在边栏里）：开关说了算——开着就弹出来
+     *    （取消停靠、切到终端页），关着就留在边栏里，不弹。
+     * 3. 副屏已经在上面显示着（没收起、没停靠、有副屏或弹过）：一定不弹，不管开关——
+     *    命令只记进日志，不打扰用户（“不是每次都弹”）。自动滚动是另一回事，照旧由
+     *    开关管（r38/r43 的 effect），这里不动。停靠状态在 Overlay 里，通过 dockedProvider
+     *    读，core 不直接 import ui。
      */
     fun popTerminalWindow() {
         val s = _state.value
         val docked = dockedProvider?.invoke() ?: false
-        val windowUp = !s.windowHidden && !docked && (s.displayId != null || s.terminalPopAt > 0L)
         val now = System.currentTimeMillis()
-        if (windowUp) {
-            // Already up and visible: the scroll switch governs (r44 behavior unchanged).
-            if (!s.termAutoscroll) return
-            _state.update { it.copy(terminalPopAt = now, windowHidden = false, page = ViewPage.TERMINAL) }
+        // Case 1: closed (×) or never attached — always pop, switch or no switch.
+        // This is the first command of a task: the user must see that it started.
+        // Closed takes priority over docked (mutually exclusive in practice, but
+        // windowHidden is the explicit user-close signal).
+        val neverAttached = s.displayId == null && s.terminalPopAt == 0L
+        if (s.windowHidden || neverAttached) {
+            _state.update {
+                it.copy(
+                    terminalPopAt = now, windowHidden = false, page = ViewPage.TERMINAL,
+                    undockRequested = if (docked) true else it.undockRequested,
+                    undockRequestedAt = if (docked) now else it.undockRequestedAt,
+                    // Switch OFF: land at the bottom once this command's entry arrives. Switch ON:
+                    // the auto-scroll effect already does it, so no one-shot is needed (and a stale
+                    // one must not fire later — setTermAutoscroll(true) clears it).
+                    popScrollAt = if (!it.termAutoscroll) now else it.popScrollAt,
+                )
+            }
             return
         }
-        // First pop: hidden, folded, or not attached yet — always pop, switch or no switch.
-        _state.update {
-            it.copy(
-                terminalPopAt = now, windowHidden = false, page = ViewPage.TERMINAL,
-                undockRequested = if (docked) true else it.undockRequested,
-                undockRequestedAt = if (docked) now else it.undockRequestedAt,
-                // Switch OFF: land at the bottom once this command's entry arrives. Switch ON:
-                // the auto-scroll effect already does it, so no one-shot is needed (and a stale
-                // one must not fire later — setTermAutoscroll(true) clears it).
-                popScrollAt = if (!it.termAutoscroll) now else it.popScrollAt,
-            )
+        // Case 2: docked to the edge tab — the scroll switch decides.
+        if (docked) {
+            if (!s.termAutoscroll) return // stay docked, no pop
+            _state.update {
+                it.copy(
+                    terminalPopAt = now, windowHidden = false, page = ViewPage.TERMINAL,
+                    undockRequested = true, undockRequestedAt = now,
+                    // Switch ON: auto-scroll already lands at the bottom; no one-shot needed.
+                )
+            }
+            return
         }
+        // Case 3: already up and visible — never pop, whatever the switch says.
+        // The command just runs and logs; auto-scroll is a separate effect governed
+        // by the switch (r38/r43) and is untouched here.
     }
 
     /**
