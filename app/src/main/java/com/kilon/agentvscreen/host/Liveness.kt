@@ -153,7 +153,7 @@ object Liveness {
         return try {
             Socket().use { s ->
                 s.connect(InetSocketAddress("127.0.0.1", port), 2_000)
-                s.soTimeout = CANARY_TIMEOUT_MS
+                s.soTimeout = CANARY_TIMEOUT_MS.toInt()
                 s.getOutputStream().write("GET /v2/ping HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".toByteArray())
                 val buf = ByteArray(256)
                 val n = s.getInputStream().read(buf)
