@@ -57,6 +57,16 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
         private val screenQueue = ReentrantLock(true)
         internal const val QUEUE_WAIT_MS = 60_000L
         @Volatile internal var queueHolder: String? = null
+        /** When the current holder took the queue (epoch ms, 0 = free) — r45 canary reads how long it has been held. */
+        @Volatile internal var queueHolderSince: Long = 0L
+
+        /** r45 canary: is the screen queue held now, by whom, and for how long (ms). Read-only; never takes the lock. */
+        internal fun queueState(): Triple<Boolean, String?, Long> {
+            val held = screenQueue.isLocked
+            val holder = queueHolder
+            val since = queueHolderSince
+            return Triple(held, holder, if (held && since > 0L) System.currentTimeMillis() - since else 0L)
+        }
 
         /** Drop everything remembered about [displayId] (called when BackgroundOperation releases it). */
         internal fun forgetDisplay(displayId: Int) {
@@ -139,13 +149,21 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
     private fun queued(spec: CommandSpec.Cmd, sid: String, block: () -> NativeOffloadResult): NativeOffloadResult {
         if (!spec.screen || screenQueue.isHeldByCurrentThread) return block()
         val call = Call.current()
-        val deadline = System.currentTimeMillis() + QUEUE_WAIT_MS
+        val t0 = System.currentTimeMillis()
+        val deadline = t0 + QUEUE_WAIT_MS
+        var warned = false
         while (!screenQueue.tryLock(200, TimeUnit.MILLISECONDS)) {
             if (call?.cancelled == true) throw ActionError("CANCELLED", tr("排队时调用方断开了，命令没有执行", "The caller went away while queued; the command did not run"))
             if (System.currentTimeMillis() > deadline) throw ActionError("QUEUE_TIMEOUT", run { val h = queueHolder ?: "?"; tr("副屏正被另一个调用使用（$h），排了 ${QUEUE_WAIT_MS / 1000} 秒还没轮到，命令没有执行。稍后重发", "The screen is in use by another call ($h); after ${QUEUE_WAIT_MS / 1000} s in the queue it was still not this command's turn, so it did not run. Send it again later") })
+            // r45: timing log — a long wait is the trace a stuck queue holder leaves (logged once).
+            if (!warned && System.currentTimeMillis() - t0 > 10_000L) {
+                warned = true
+                AppLogger.warning(TAG, "queued ${spec.name} waited ${(System.currentTimeMillis() - t0) / 1000}s for the screen (held by ${queueHolder ?: "?"})")
+            }
         }
         queueHolder = "${call?.tokenName ?: "main"}/$sid ${spec.name}"
-        try { return block() } finally { queueHolder = null; screenQueue.unlock() }
+        queueHolderSince = System.currentTimeMillis()
+        try { return block() } finally { queueHolder = null; queueHolderSince = 0L; screenQueue.unlock() }
     }
 
     /**
