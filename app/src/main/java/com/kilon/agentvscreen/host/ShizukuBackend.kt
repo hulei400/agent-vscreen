@@ -7,8 +7,10 @@ import android.net.Uri
 import com.kilon.agentvscreen.host.AppLogger
 import rikka.shizuku.Shizuku
 import rikka.sui.Sui
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * [T-android-privileged-backend] Shizuku-protocol privileged-execution backend.
@@ -91,11 +93,30 @@ class ShizukuBackend(private val appContext: Context) {
         runCatching { appContext.packageManager.getPackageInfo(pkg, 0); true }.getOrDefault(false)
     }
 
+    /**
+     * r45: pingBinder with a timeout, on a fresh thread. A frozen Shizuku server blocks a plain pingBinder() forever,
+     * and the old code called it before every command (via refreshStatus) and before every shell run. A timeout counts
+     * as "not alive" — the caller gets a clear error instead of hanging.
+     */
+    fun pingTimed(timeoutMs: Long = 5_000L): Boolean {
+        val done = CountDownLatch(1)
+        val alive = AtomicBoolean(false)
+        Thread({
+            try { alive.set(Shizuku.pingBinder()) } catch (t: Throwable) { /* dead */ } finally { done.countDown() }
+        }, "shizuku-ping").apply { isDaemon = true }.start()
+        if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            AppLogger.warning(TAG, "pingBinder timed out after ${timeoutMs}ms (Shizuku server not responding)")
+            return false
+        }
+        return alive.get()
+    }
+
     fun isBinderAlive(): Boolean =
-        runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+        runCatching { pingTimed() }.getOrDefault(false)
 
     fun isPermissionGranted(): Boolean = runCatching {
-        Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        // The ping just proved the server answers, so the permission check after it should return promptly.
+        pingTimed() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     }.getOrDefault(false)
 
     fun snapshot(): ShizukuManager.Snapshot {
@@ -159,7 +180,7 @@ class ShizukuBackend(private val appContext: Context) {
     }
 
     fun requestPermission() {
-        if (!runCatching { Shizuku.pingBinder() }.getOrDefault(false)) return
+        if (!pingTimed()) return
         if (Shizuku.shouldShowRequestPermissionRationale()) {
             AppLogger.warning(TAG, "permission permanently denied — user must enable in the manager app")
             return
@@ -169,11 +190,11 @@ class ShizukuBackend(private val appContext: Context) {
     }
 
     private fun versionOrUnknown(): Int = runCatching {
-        if (Shizuku.pingBinder()) Shizuku.getVersion() else -1
+        if (pingTimed()) Shizuku.getVersion() else -1
     }.getOrDefault(-1)
 
     private fun uidOrUnknown(): Int = runCatching {
-        if (Shizuku.pingBinder()) Shizuku.getUid() else -1
+        if (pingTimed()) Shizuku.getUid() else -1
     }.getOrDefault(-1)
 
     /**
@@ -198,17 +219,10 @@ class ShizukuBackend(private val appContext: Context) {
         // have it, treat it as a normal Process and use the standard
         // waitFor(timeout, unit) API rather than reflecting for a
         // nonexistent `waitForTimeout` method (T343).
-        val procAny = runCatching {
-            val m = Shizuku::class.java.getDeclaredMethod(
-                "newProcess",
-                Array<String>::class.java,
-                Array<String>::class.java,
-                String::class.java,
-            )
-            m.isAccessible = true
-            m.invoke(null, argv, env, cwd)
-        }.getOrElse {
-            AppLogger.warning(TAG, "newProcess reflection failed: ${it.message}")
+        // r45: newProcess is a Binder call; a frozen server blocks it forever, so it runs on a fresh thread with a
+        // timeout (the 8 s waitFor below only covers a process that already exists).
+        val procAny = newProcessTimed(argv, env, cwd).getOrElse {
+            AppLogger.warning(TAG, "newProcess failed: ${it.message}")
             return ShizukuManager.ProcessResult(1, "", "shizuku.newProcess unavailable: ${it.message}")
         } ?: return ShizukuManager.ProcessResult(1, "", "shizuku.newProcess returned null")
 
@@ -282,6 +296,31 @@ class ShizukuBackend(private val appContext: Context) {
         com.kilon.agentvscreen.host.quiet("ShizukuBackend:282") { errThread.join(2000) }
         val rc = runCatching { proc.exitValue() }.getOrDefault(-1)
         return ShizukuManager.ProcessResult(rc, out.toString().trimEnd('\n'), err.toString().trimEnd('\n'))
+    }
+
+    /** r45: Shizuku.newProcess on a fresh thread, with a timeout. A timeout is a failure, not a null — the caller logs it and the command fails with a clear error instead of hanging. */
+    private fun newProcessTimed(argv: Array<String>, env: Array<String>?, cwd: String?, timeoutMs: Long = 10_000L): Result<Any?> {
+        val done = CountDownLatch(1)
+        val res = AtomicReference<Result<Any?>?>()
+        Thread({
+            try {
+                val m = Shizuku::class.java.getDeclaredMethod(
+                    "newProcess",
+                    Array<String>::class.java,
+                    Array<String>::class.java,
+                    String::class.java,
+                )
+                m.isAccessible = true
+                res.set(Result.success(m.invoke(null, argv, env, cwd)))
+            } catch (t: Throwable) {
+                res.set(Result.failure(t))
+            } finally { done.countDown() }
+        }, "shizuku-newprocess").apply { isDaemon = true }.start()
+        if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            AppLogger.warning(TAG, "newProcess timed out after ${timeoutMs}ms (Shizuku server not responding)")
+            return Result.failure(IllegalStateException("shizuku.newProcess timed out after ${timeoutMs}ms"))
+        }
+        return res.get() ?: Result.failure(IllegalStateException("shizuku.newProcess: no result"))
     }
 
     companion object {
