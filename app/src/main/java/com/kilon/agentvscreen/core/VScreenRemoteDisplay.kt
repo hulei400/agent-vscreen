@@ -118,7 +118,7 @@ internal object VScreenRemoteDisplay {
     }
 
     fun create(name: String, width: Int, height: Int, dpi: Int, surface: Surface, screenOffKeep: Boolean = true): Result<Created> {
-        val b = service().getOrElse { return Result.failure<Created>(it).also { AppLogger.warning(TAG, "remote create failed: ${it.message}") } }
+        val b = service().getOrElse { e -> return Result.failure<Created>(e).also { AppLogger.warning(TAG, "remote create failed: ${e.message}") } }
         return timed(TRANSACT_TIMEOUT_MS, "create display") {
             val data = Parcel.obtain(); val reply = Parcel.obtain()
             try {
