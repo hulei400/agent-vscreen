@@ -9,6 +9,8 @@ import android.net.Uri
 import android.os.SystemClock
 import android.provider.Settings
 import org.json.JSONObject
+import java.net.InetSocketAddress
+import java.net.Socket
 
 /**
  * Is this process really kept alive while it sits in the background?
@@ -41,6 +43,10 @@ object Liveness {
     @Volatile var lastScreenOnFreezeMs = 0L; private set
     /** Screen-on freezes since the user last opened the background settings page (or since start). */
     @Volatile var screenOnFreezesSinceVisit = 0; private set
+    /** r45 canary: probe every 5 s; a probe that takes longer than this counts as stuck. */
+    private const val CANARY_INTERVAL_MS = 5_000L
+    private const val CANARY_TIMEOUT_MS = 3_000L
+    private const val CANARY_BINDER_TIMEOUT_MS = 3_000L
     @Volatile private var pm: android.os.PowerManager? = null
     @Volatile private var app: Context? = null
     fun init(ctx: Context) { app = ctx.applicationContext; pm = ctx.getSystemService(android.os.PowerManager::class.java) }
@@ -55,27 +61,109 @@ object Liveness {
     fun serviceGone() { foreground = false }
 
     @Synchronized fun start() {
-        if (ticker?.isAlive == true) return
-        ticker = Thread({
-            var last = SystemClock.uptimeMillis()
-            var wasOn = interactive()
-            while (true) {
-                try { Thread.sleep(1_000) } catch (_: InterruptedException) { return@Thread }
-                val now = SystemClock.uptimeMillis()
-                val gap = now - last - 1_000
-                last = now
-                val on = interactive()
-                if (gap >= 3_000) {
-                    freezes++; lastFreezeMs = gap; lastFreezeAt = SystemClock.elapsedRealtime(); lastFreezeWall = System.currentTimeMillis()
-                    if (gap > longestFreezeMs) longestFreezeMs = gap
-                    // On before and after the gap: the user was using the phone while we were frozen.
-                    val screenOn = wasOn && on
-                    if (screenOn) { screenOnFreezes++; screenOnFreezesSinceVisit++; lastScreenOnFreezeMs = gap; lastScreenOnFreezeWall = lastFreezeWall }
-                    AppLogger.warning("Liveness", "process was frozen for ${gap / 1000}s (${if (screenOn) "screen on" else "screen off: ignored for setup"})")
+        if (ticker?.isAlive != true) {
+            ticker = Thread({
+                var last = SystemClock.uptimeMillis()
+                var wasOn = interactive()
+                while (true) {
+                    try { Thread.sleep(1_000) } catch (_: InterruptedException) { return@Thread }
+                    val now = SystemClock.uptimeMillis()
+                    val gap = now - last - 1_000
+                    last = now
+                    val on = interactive()
+                    if (gap >= 3_000) {
+                        freezes++; lastFreezeMs = gap; lastFreezeAt = SystemClock.elapsedRealtime(); lastFreezeWall = System.currentTimeMillis()
+                        if (gap > longestFreezeMs) longestFreezeMs = gap
+                        // On before and after the gap: the user was using the phone while we were frozen.
+                        val screenOn = wasOn && on
+                        if (screenOn) { screenOnFreezes++; screenOnFreezesSinceVisit++; lastScreenOnFreezeMs = gap; lastScreenOnFreezeWall = lastFreezeWall }
+                        AppLogger.warning("Liveness", "process was frozen for ${gap / 1000}s (${if (screenOn) "screen on" else "screen off: ignored for setup"})")
+                    }
+                    wasOn = on
                 }
-                wasOn = on
+            }, "vscreen-liveness").apply { isDaemon = true; priority = Thread.MAX_PRIORITY }.also { it.start() }
+        }
+        if (canaryThread?.isAlive != true) {
+            canaryThread = Thread({ canaryLoop() }, "vscreen-canary").apply { isDaemon = true }.also { it.start() }
+        }
+    }
+
+    // ── r45 canary: "alive but stuck" ──────────────────────────────────────
+    // The 1 s ticker above only sees a whole frozen process. The 2026-11-16 freeze was a service that was alive but
+    // answered nothing (the ping never reached ApiServer), and frozen_count stayed 0. So a second thread probes, every
+    // 5 s, the layers a command actually goes through: the HTTP ping (the exact path the CLI checks), the ApiServer
+    // pool, the screen queue and the Shizuku binder. It runs on its own thread and never touches the ticker thread;
+    // it only logs when a state changes (stuck -> answering, binder down -> up), never every probe.
+    /** Last HTTP ping round-trip (ms); -1 = never answered. */
+    @Volatile var canaryMs: Long = -1; private set
+    /** The last HTTP ping did not answer within [CANARY_TIMEOUT_MS]. */
+    @Volatile var canaryStuck = false; private set
+    /** The last HTTP ping got 503 (pool full) instead of 200. */
+    @Volatile var canaryPoolBusy = false; private set
+    /** ApiServer pool workers busy at the last probe. */
+    @Volatile var poolActiveWorkers = 0; private set
+    /** Who holds the screen queue now (null when free). */
+    @Volatile var queueHolderNow: String? = null; private set
+    /** How long the screen queue has been held (ms). */
+    @Volatile var queueHoldMs: Long = 0; private set
+    /** The Shizuku binder answered the last probe. */
+    @Volatile var binderOk = true; private set
+    /** Last Binder ping round-trip (ms); -1 = never answered. */
+    @Volatile var binderMs: Long = -1; private set
+    private var canaryThread: Thread? = null
+
+    private fun canaryLoop() {
+        while (true) {
+            try { Thread.sleep(CANARY_INTERVAL_MS) } catch (_: InterruptedException) { return }
+            runCatching { probeOnce() }
+        }
+    }
+
+    private fun probeOnce() {
+        // 1. HTTP ping: the exact path the CLI checks (and the one that failed on 2026-11-16).
+        val t0 = SystemClock.elapsedRealtime()
+        val ping = pingHttp()
+        val ms = SystemClock.elapsedRealtime() - t0
+        val wasStuck = canaryStuck
+        when (ping) {
+            200 -> { canaryMs = ms; canaryStuck = false; canaryPoolBusy = false }
+            503 -> { canaryMs = ms; canaryStuck = false; canaryPoolBusy = true }
+            else -> { canaryStuck = true }
+        }
+        if (canaryStuck && !wasStuck) AppLogger.warning("Liveness", "canary: HTTP ping did not answer in ${ms}ms (service alive but not answering)")
+        else if (!canaryStuck && wasStuck) AppLogger.warning("Liveness", "canary: HTTP ping answered again (${ms}ms)")
+        // 2. Pool workers and screen queue (read-only; never take a lock).
+        poolActiveWorkers = runCatching { HostService.server?.poolActive ?: 0 }.getOrDefault(0)
+        runCatching {
+            val (_, holder, holdMs) = HostService.server?.queueState() ?: Triple(false, null, 0L)
+            queueHolderNow = holder; queueHoldMs = holdMs
+        }
+        // 3. Shizuku binder (timed; a frozen server must not stall this thread). Log only on transition.
+        val wasBinderOk = binderOk
+        val bt0 = SystemClock.elapsedRealtime()
+        binderOk = runCatching { ShizukuManager.pingTimed(CANARY_BINDER_TIMEOUT_MS) }.getOrDefault(false)
+        binderMs = SystemClock.elapsedRealtime() - bt0
+        if (!binderOk && wasBinderOk) AppLogger.warning("Liveness", "canary: Shizuku binder stopped answering")
+        else if (binderOk && !wasBinderOk) AppLogger.warning("Liveness", "canary: Shizuku binder answered again")
+    }
+
+    /** GET /v2/ping on loopback, with a timeout. Returns the HTTP status, or -1 when it did not answer. */
+    private fun pingHttp(): Int {
+        val port = runCatching { com.kilon.agentvscreen.api.ApiConfig.port }.getOrNull() ?: return -1
+        return try {
+            Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", port), 2_000)
+                s.soTimeout = CANARY_TIMEOUT_MS
+                s.getOutputStream().write("GET /v2/ping HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".toByteArray())
+                val buf = ByteArray(256)
+                val n = s.getInputStream().read(buf)
+                if (n <= 0) return -1
+                val line = String(buf, 0, n, Charsets.UTF_8).lineSequence().firstOrNull() ?: return -1
+                Regex("HTTP/1.1 (\\d+)").find(line)?.groupValues?.get(1)?.toIntOrNull() ?: -1
             }
-        }, "vscreen-liveness").apply { isDaemon = true; priority = Thread.MAX_PRIORITY }.also { it.start() }
+        } catch (e: Exception) {
+            -1
+        }
     }
 
     private fun visitedAt(): Long = app?.let { prefs(it).getLong("vendor_bg_visited", 0L) } ?: 0L
@@ -109,6 +197,16 @@ object Liveness {
         .put("frozen_unresolved", frozenUnresolved())
         .put("keep_alive_window", Presence.up)
         .put("pid", android.os.Process.myPid())
+        // r45 canary: "alive but stuck" — frozen_count above only sees a whole frozen process; these say which layer
+        // is stuck when the service answers nothing.
+        .put("pool_active_workers", poolActiveWorkers)
+        .put("queue_holder", queueHolderNow ?: JSONObject.NULL)
+        .put("queue_hold_ms", queueHoldMs)
+        .put("last_canary_ms", if (canaryMs >= 0) canaryMs else JSONObject.NULL)
+        .put("canary_stuck", canaryStuck)
+        .put("canary_pool_busy", canaryPoolBusy)
+        .put("binder_ok", binderOk)
+        .put("binder_ms", if (binderMs >= 0) binderMs else JSONObject.NULL)
 
     /**
      * Open the vendor page where an app is allowed to keep running in the background (launch manager / autostart);
