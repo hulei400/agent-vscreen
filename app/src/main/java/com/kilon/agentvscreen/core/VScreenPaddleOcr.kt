@@ -6,8 +6,13 @@ import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.os.SystemClock
 import com.kilon.agentvscreen.host.AppLogger
 import java.nio.FloatBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -84,13 +89,59 @@ internal object VScreenPaddleOcr {
         }
     }
 
-    /** Items in frame pixels. Throws on any failure. Not on the main thread. One reading at a time (v44: callers on several threads). */
-    @Synchronized
+    /** Longest one accurate reading may take (the caller waits this long; the ML Kit fast path uses the same 10 s). */
+    const val OCR_TIMEOUT_MS = 10_000L
+
+    /** One reading at a time: the ONNX engine is not thread-safe. tryLock, not lock, so a hung inference fails fast for later callers instead of queueing them forever behind it. */
+    private val ocrLock = ReentrantLock()
+
+    /**
+     * Items in frame pixels. Throws on any failure. Not on the main thread. One reading at a time (v44: callers on
+     * several threads).
+     *
+     * r45: the native ONNX inference has no timeout of its own, and the old @Synchronized let one hung inference hold
+     * the engine forever while every later OCR queued behind it. So the inference runs on a fresh thread (never a
+     * shared executor — a hung native call would occupy its thread for good and block every later OCR), the caller
+     * waits at most [OCR_TIMEOUT_MS], and the engine lock is [ReentrantLock.tryLock] with the same timeout. A timeout
+     * does NOT stop the native call — its thread stays where it is until the inference returns, and later calls keep
+     * failing fast until the lock is free again. That is still far better than the whole service hanging: the service
+     * stays responsive, and later OCR recovers on its own once the hung inference finishes.
+     */
     fun recognize(context: Context, frame: Bitmap): List<VScreenOcr.Item> {
-        val e = engine(context)
-        val boxes = detect(e, frame)
-        if (boxes.isEmpty()) return emptyList()
-        return recognizeBoxes(e, frame, boxes)
+        val result = AtomicReference<List<VScreenOcr.Item>?>()
+        val failure = AtomicReference<Throwable?>()
+        val done = CountDownLatch(1)
+        Thread({
+            try {
+                result.set(recognizeLocked(context, frame))
+            } catch (t: Throwable) {
+                failure.set(t)
+            } finally {
+                done.countDown()
+            }
+        }, "vscreen-ocr").apply { isDaemon = true }.start()
+        val t0 = SystemClock.elapsedRealtime()
+        if (!done.await(OCR_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            val took = SystemClock.elapsedRealtime() - t0
+            AppLogger.warning(TAG, "PP-OCRv6 timed out after ${took}ms (the native inference is still running on its own thread; later calls fail fast until it finishes)")
+            throw IllegalStateException("PP-OCRv6 timed out after ${OCR_TIMEOUT_MS}ms")
+        }
+        failure.get()?.let { throw it }
+        return result.get() ?: emptyList()
+    }
+
+    private fun recognizeLocked(context: Context, frame: Bitmap): List<VScreenOcr.Item> {
+        if (!ocrLock.tryLock(OCR_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            throw IllegalStateException("PP-OCRv6 busy: another inference has held the engine for ${OCR_TIMEOUT_MS}ms+")
+        }
+        try {
+            val e = engine(context)
+            val boxes = detect(e, frame)
+            if (boxes.isEmpty()) return emptyList()
+            return recognizeBoxes(e, frame, boxes)
+        } finally {
+            ocrLock.unlock()
+        }
     }
 
     // ── detection ─────────────────────────────────────────────────────────
