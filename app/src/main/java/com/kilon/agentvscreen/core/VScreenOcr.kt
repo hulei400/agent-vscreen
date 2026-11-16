@@ -113,6 +113,9 @@ internal object VScreenOcr {
                 val items = VScreenPaddleOcr.recognize(BackgroundOperation.appContextOrNull()!!, frame)
                 val took = SystemClock.elapsedRealtime() - t0
                 accurateMs = if (accurateMs == 0L) took else (accurateMs * 3 + took) / 4
+                // r45: timing log — a slow accurate reading is the trace a stuck OCR leaves (the timeout itself is
+                // logged by VScreenPaddleOcr and falls back to ML Kit below).
+                if (took > 5_000L) AppLogger.warning(TAG, "accurate OCR took ${took}ms (slow)")
                 return Result(items, displayId, version, took, null, ScreenSig.of(frame),
                     engine = VScreenPaddleOcr.ENGINE).also { accurateCache = it }
             } catch (t: Throwable) {
