@@ -172,6 +172,14 @@ object Overlay {
     internal val widthPx = mutableFloatStateOf(0f)
     internal val docked = mutableStateOf(false)
     internal val dockRight = mutableStateOf(true)
+
+    init {
+        // r46: the shell pop decision lives in BackgroundOperation (core) and needs to know
+        // whether the window is folded into its edge tab; the fold state lives here, so hand
+        // it over as a provider instead of letting core import ui (same pattern as
+        // VScreenRules.hostFactory). Unset until this object loads = not folded.
+        BackgroundOperation.dockedProvider = { docked.value }
+    }
     internal val hold = mutableFloatStateOf(0f)
     internal val holdAt = mutableStateOf(Offset.Zero)
     internal val hintAt = mutableLongStateOf(0L)
@@ -910,6 +918,16 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             BackgroundOperation.clearDockRequest()
         }
     }
+    // r46: the mirror of the fold effect — a shell command's first pop unfolds a folded window.
+    // It has to be a request of its own: the pop-time effect above only fires on a pop newer than
+    // the last one it saw, and a re-attached window starts its counter at the current pop time,
+    // so without this a first pop that re-attaches a folded window would leave it as an edge tab.
+    LaunchedEffect(s.undockRequested) {
+        if (s.undockRequested) {
+            if (Overlay.docked.value) Overlay.undock()
+            BackgroundOperation.clearUndockRequest()
+        }
+    }
     if (Overlay.docked.value) { DockTab(mode, Overlay.dockRight.value); return }
     val density = LocalDensity.current
     val landscape = Overlay.aspect() > 1f
@@ -1098,16 +1116,32 @@ private fun TerminalView(k: Float, entries: List<VScreenTerminal.Entry>) {
     val s by BackgroundOperation.state.collectAsState()
     val autoScroll = s.termAutoscroll
     // r38: 开关开着时打开页面就停在最下面（initialFirstVisibleItemIndex）；关着时从最上面开始。
+    // r46: 第一次弹起（popScrollAt，有请求）也从最下面开始，哪怕开关关着——弹出来要看到最新那条命令。
     val listState = rememberLazyListState(
-        initialFirstVisibleItemIndex = if (autoScroll && entries.isNotEmpty()) entries.size - 1 else 0)
+        initialFirstVisibleItemIndex = if ((autoScroll || s.popScrollAt > 0L) && entries.isNotEmpty()) entries.size - 1 else 0)
     // r38: 开关开着时，每来一条新命令就直接滚到底部，不再判断“是否已在底部附近”。
     // 开关打开的瞬间也会滚到底部；关着时不自动滚，由用户手动滑。
     // r43: key 不能是 entries.size——内存日志满 50 条后 size 永远停在 50，key 不变、effect
     // 不再触发，跑多了命令就不滚了（用户就是这么碰上的）。改成最新一条的单调 id
     // （Entry.nextId 每条新命令 +1，满了顶掉旧条也照样变），满 50 条后照样滚到底部。
-    LaunchedEffect(entries.lastOrNull()?.id, autoScroll) {
-        if (entries.isEmpty() || !autoScroll) return@LaunchedEffect
-        listState.scrollToItem(entries.size - 1)
+    // r46: 开关关着时，只有第一次弹起才滚一次（popScrollAt）：弹起时这条命令的记录还没到
+    // （run 里先弹、跑完才记），所以等最新一条记录的时间 >= 弹起时间再滚——也就是这条命令
+    // 的结果到了——滚完把请求清掉，后面的命令不再滚。开关开着时 popScrollAt 不用管，
+    // 自动滚本来就会滚；这时顺带把残留的请求清掉，免得它以后开关关了又冒出来滚一次。
+    LaunchedEffect(entries.lastOrNull()?.id, autoScroll, s.popScrollAt) {
+        if (entries.isEmpty()) return@LaunchedEffect
+        if (autoScroll) {
+            if (s.popScrollAt > 0L) BackgroundOperation.clearPopScroll()
+            listState.scrollToItem(entries.size - 1)
+            return@LaunchedEffect
+        }
+        val req = s.popScrollAt
+        if (req <= 0L) return@LaunchedEffect
+        val last = entries.lastOrNull() ?: return@LaunchedEffect
+        if (last.atMs >= req) {
+            listState.scrollToItem(entries.size - 1)
+            BackgroundOperation.clearPopScroll()
+        }
     }
     Column(
         Modifier.fillMaxSize().background(Color(0xFF0B0D14))
