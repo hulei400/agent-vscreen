@@ -3,6 +3,7 @@ package com.kilon.agentvscreen.host
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import com.kilon.agentvscreen.host.AppLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +29,8 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 object ShizukuManager {
     private const val TAG = "ShizukuManager"
+    /** A refresh running longer than this is presumed stuck; a new one may start. */
+    private const val REFRESH_STALE_MS = 15_000L
 
     enum class State { NOT_INSTALLED, NOT_RUNNING, NEED_PERMISSION, READY }
 
@@ -71,6 +74,36 @@ object ShizukuManager {
     }
 
     fun refresh() = recompute("manual-refresh")
+
+    /**
+     * r45: refresh the snapshot on a background thread; the caller never waits. A frozen Shizuku server blocks a plain
+     * pingBinder() forever, so a synchronous refresh before every command dispatch could hang every command. Callers
+     * read the cached [snapshot] instead. At most one refresh runs at a time; a refresh that has been running longer
+     * than [REFRESH_STALE_MS] is presumed stuck and a new one may start (its thread is orphaned but holds no shared
+     * resource, and a stuck pingBinder finishes on its own when the server answers again).
+     */
+    private val refreshLock = Any()
+    @Volatile private var refreshRunningSince = 0L
+    fun refreshAsync() {
+        val now = SystemClock.elapsedRealtime()
+        synchronized(refreshLock) {
+            if (refreshRunningSince != 0L && now - refreshRunningSince < REFRESH_STALE_MS) return
+            refreshRunningSince = now
+        }
+        Thread({
+            try {
+                recompute("async-refresh")
+            } catch (t: Throwable) {
+                AppLogger.warning(TAG, "async refresh failed: ${t.message}")
+            } finally {
+                synchronized(refreshLock) { if (refreshRunningSince == now) refreshRunningSince = 0L }
+            }
+        }, "shizuku-refresh").apply { isDaemon = true }.start()
+    }
+
+    /** r45 canary: is the Shizuku binder alive, with a timeout (a frozen server blocks a plain pingBinder() forever). */
+    fun pingTimed(timeoutMs: Long = 3_000L): Boolean =
+        backend?.let { runCatching { it.pingTimed(timeoutMs) }.getOrDefault(false) } ?: false
 
     fun isReady(): Boolean = _snapshot.value.state == State.READY
 
