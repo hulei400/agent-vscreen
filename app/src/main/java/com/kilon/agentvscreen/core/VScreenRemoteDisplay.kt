@@ -6,12 +6,15 @@ import android.content.ComponentName
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.os.Parcel
+import android.os.SystemClock
 import android.view.Surface
 import com.kilon.agentvscreen.BuildConfig
 import com.kilon.agentvscreen.host.ShizukuManager
 import com.kilon.agentvscreen.host.AppLogger
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import rikka.shizuku.Shizuku
 
 /**
@@ -22,6 +25,52 @@ import rikka.shizuku.Shizuku
 internal object VScreenRemoteDisplay {
     private const val TAG = "VScreenRemoteDisplay"
     private const val BIND_TIMEOUT_S = 10L
+    /** Longest one transact to the screen service may take (a normal one is well under 100 ms). */
+    private const val TRANSACT_TIMEOUT_MS = 10_000L
+    /** Longest a binder liveness ping may take. */
+    private const val PING_TIMEOUT_MS = 3_000L
+    /** A transact that took this long still finished, but slowly — worth a log line. */
+    private const val TRANSACT_SLOW_MS = 5_000L
+
+    /**
+     * r45: run [block] on a fresh thread, wait at most [timeoutMs]. A transact to a frozen service blocks forever in
+     * Binder; the timeout turns it into a failure instead of hanging the caller (and the pool worker) for good. The
+     * orphaned thread holds no shared resource — its Parcels are its own. Note the ambiguity a timeout leaves: the
+     * service may still have carried the call out (a release that timed out may already have released). Retries must
+     * be idempotent — release, removeTask, moveTask and the read-only calls are; a create that timed out may have
+     * left an orphaned display behind (the service's orphan reaper cleans it up).
+     */
+    private fun <T> timed(timeoutMs: Long, what: String, block: () -> T): Result<T> {
+        val res = AtomicReference<Result<T>?>()
+        val done = CountDownLatch(1)
+        Thread({
+            try { res.set(runCatching(block)) } catch (t: Throwable) { res.set(Result.failure(t)) } finally { done.countDown() }
+        }, "vscreen-transact").apply { isDaemon = true }.start()
+        val t0 = SystemClock.elapsedRealtime()
+        if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            val took = SystemClock.elapsedRealtime() - t0
+            AppLogger.warning(TAG, "$what timed out after ${took}ms (service not responding; it may still complete on the service side)")
+            return Result.failure(IllegalStateException(tr("副屏服务 ${took / 1000} 秒没有响应（可能被系统冻结）", "The screen service did not respond for ${took / 1000} s (it may be frozen by the system)")))
+        }
+        val took = SystemClock.elapsedRealtime() - t0
+        if (took > TRANSACT_SLOW_MS) AppLogger.warning(TAG, "$what took ${took}ms (slow)")
+        return res.get() ?: Result.failure(IllegalStateException("$what: no result"))
+    }
+
+    /** r45: pingBinder with a timeout. A frozen service blocks a plain isBinderAlive forever. */
+    private fun binderAlive(b: IBinder?, timeoutMs: Long = PING_TIMEOUT_MS): Boolean {
+        if (b == null) return false
+        val done = CountDownLatch(1)
+        val alive = AtomicBoolean(false)
+        Thread({
+            try { alive.set(b.pingBinder()) } catch (t: Throwable) { /* dead */ } finally { done.countDown() }
+        }, "vscreen-ping").apply { isDaemon = true }.start()
+        if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            AppLogger.warning(TAG, "service pingBinder timed out after ${timeoutMs}ms")
+            return false
+        }
+        return alive.get()
+    }
 
     data class Created(val displayId: Int, val flags: Int) {
         val trusted: Boolean get() = VScreenDisplayService.isTrusted(flags)
@@ -40,7 +89,8 @@ internal object VScreenRemoteDisplay {
 
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            binder = service?.takeIf { it.pingBinder() }
+            // r45: bounded ping (this runs on the main thread; a plain pingBinder to a frozen service would ANR).
+            binder = service?.takeIf { binderAlive(it) }
             latch?.countDown()
         }
         override fun onServiceDisconnected(name: ComponentName?) { binder = null }
@@ -49,10 +99,10 @@ internal object VScreenRemoteDisplay {
 
     /** A live service binder, binding (and waiting) if needed. Never on the main thread. */
     private fun service(): Result<IBinder> {
-        binder?.takeIf { it.isBinderAlive }?.let { return Result.success(it) }
+        binder?.takeIf { binderAlive(it) }?.let { return Result.success(it) }
         if (!ShizukuManager.isReady()) return Result.failure(IllegalStateException(tr("Shizuku 未就绪", "Shizuku not ready")))
         synchronized(lock) {
-            binder?.takeIf { it.isBinderAlive }?.let { return Result.success(it) }
+            binder?.takeIf { binderAlive(it) }?.let { return Result.success(it) }
             val l = CountDownLatch(1).also { latch = it }
             try {
                 Shizuku.bindUserService(args, conn)
@@ -67,45 +117,50 @@ internal object VScreenRemoteDisplay {
         }
     }
 
-    fun create(name: String, width: Int, height: Int, dpi: Int, surface: Surface, screenOffKeep: Boolean = true): Result<Created> = runCatching {
-        val b = service().getOrThrow()
-        val data = Parcel.obtain(); val reply = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(VScreenDisplayService.DESCRIPTOR)
-            data.writeString(name); data.writeInt(width); data.writeInt(height); data.writeInt(dpi)
-            data.writeInt(0) // 0 = let the service walk its flag ladder
-            // Protocol 11: whether the new display keeps a screen-off wake lock (see VScreenDisplayService).
-            data.writeInt(if (screenOffKeep) 1 else 0)
-            surface.writeToParcel(data, 0)
-            b.transact(VScreenDisplayService.CREATE, data, reply, 0)
-            if (reply.readInt() != 0) error(reply.readString() ?: "unknown error")
-            Created(reply.readInt(), reply.readInt())
-        } finally { data.recycle(); reply.recycle() }
-    }.onFailure { AppLogger.warning(TAG, "remote create failed: ${it.message}") }
+    fun create(name: String, width: Int, height: Int, dpi: Int, surface: Surface, screenOffKeep: Boolean = true): Result<Created> {
+        val b = service().getOrElse { return Result.failure<Created>(it).also { AppLogger.warning(TAG, "remote create failed: ${it.message}") } }
+        return timed(TRANSACT_TIMEOUT_MS, "create display") {
+            val data = Parcel.obtain(); val reply = Parcel.obtain()
+            try {
+                data.writeInterfaceToken(VScreenDisplayService.DESCRIPTOR)
+                data.writeString(name); data.writeInt(width); data.writeInt(height); data.writeInt(dpi)
+                data.writeInt(0) // 0 = let the service walk its flag ladder
+                // Protocol 11: whether the new display keeps a screen-off wake lock (see VScreenDisplayService).
+                data.writeInt(if (screenOffKeep) 1 else 0)
+                surface.writeToParcel(data, 0)
+                b.transact(VScreenDisplayService.CREATE, data, reply, 0)
+                if (reply.readInt() != 0) error(reply.readString() ?: "unknown error")
+                Created(reply.readInt(), reply.readInt())
+            } finally { data.recycle(); reply.recycle() }
+        }.onFailure { AppLogger.warning(TAG, "remote create failed: ${it.message}") }
+    }
 
     fun release(displayId: Int) {
-        val b = binder?.takeIf { it.isBinderAlive } ?: return
-        val data = Parcel.obtain(); val reply = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(VScreenDisplayService.DESCRIPTOR)
-            data.writeInt(displayId)
-            b.transact(VScreenDisplayService.RELEASE, data, reply, 0)
-        } catch (t: Throwable) {
-            AppLogger.warning(TAG, "remote release($displayId) failed: ${t.message}")
-        } finally { data.recycle(); reply.recycle() }
+        val b = binder?.takeIf { binderAlive(it) } ?: return
+        // Best effort, and the caller must not wait long for it: 5 s, not the full transact timeout.
+        timed(5_000L, "release $displayId") {
+            val data = Parcel.obtain(); val reply = Parcel.obtain()
+            try {
+                data.writeInterfaceToken(VScreenDisplayService.DESCRIPTOR)
+                data.writeInt(displayId)
+                b.transact(VScreenDisplayService.RELEASE, data, reply, 0)
+            } finally { data.recycle(); reply.recycle() }
+        }.onFailure { AppLogger.warning(TAG, "remote release($displayId) failed: ${it.message}") }
     }
 
     /** Run one call on the service; null when the service is not available. */
-    private fun <T> call(code: Int, write: (Parcel) -> Unit, read: (Parcel) -> T): Result<T> = runCatching {
-        val b = service().getOrThrow()
-        val data = Parcel.obtain(); val reply = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(VScreenDisplayService.DESCRIPTOR)
-            write(data)
-            if (!b.transact(code, data, reply, 0)) error(tr("副屏服务不认识这个调用（旧版本服务仍在运行，重连后会更新）", "The screen service does not know this call (an old service version is still running; it updates after a reconnect)"))
-            if (reply.readInt() != 0) error(reply.readString() ?: "unknown error")
-            read(reply)
-        } finally { data.recycle(); reply.recycle() }
+    private fun <T> call(code: Int, write: (Parcel) -> Unit, read: (Parcel) -> T): Result<T> {
+        val b = service().getOrElse { return Result.failure(it) }
+        return timed(TRANSACT_TIMEOUT_MS, "transact $code") {
+            val data = Parcel.obtain(); val reply = Parcel.obtain()
+            try {
+                data.writeInterfaceToken(VScreenDisplayService.DESCRIPTOR)
+                write(data)
+                if (!b.transact(code, data, reply, 0)) error(tr("副屏服务不认识这个调用（旧版本服务仍在运行，重连后会更新）", "The screen service does not know this call (an old service version is still running; it updates after a reconnect)"))
+                if (reply.readInt() != 0) error(reply.readString() ?: "unknown error")
+                read(reply)
+            } finally { data.recycle(); reply.recycle() }
+        }
     }
 
     /** Key event with the display id set (reaches a display with its own focus). */
@@ -144,11 +199,11 @@ internal object VScreenRemoteDisplay {
         val isAppTask: Boolean get() = activityType !in setOf(2, 3, 4, 5)
     }
 
-    fun isConnected(): Boolean = binder?.isBinderAlive == true
+    fun isConnected(): Boolean = binderAlive(binder)
 
     /** [listTasks] only when the service is already connected (never binds or waits); null otherwise. */
     fun listTasksIfConnected(displayId: Int): List<DisplayTask>? {
-        if (binder?.isBinderAlive != true) return null
+        if (!binderAlive(binder)) return null
         return listTasks(displayId).getOrNull()
     }
 
@@ -202,7 +257,7 @@ internal object VScreenRemoteDisplay {
 
     /** Keep-alive for the orphan reaper; cheap, fire-and-forget. */
     fun touch(displayId: Int) {
-        if (binder?.isBinderAlive != true) return
+        if (!binderAlive(binder)) return
         call(VScreenDisplayService.TOUCH, { it.writeInt(displayId) }) { }
     }
 }
