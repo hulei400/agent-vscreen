@@ -216,12 +216,19 @@ internal fun VScreenOffloadHandler.snapshot(d: VScreenDisplay, freshMs: Long = 1
         var reused = false
         val items: List<VScreenOcr.Item>? = if (fv == null) null else {
             VScreenPerception.readingFor(d.displayId, fv.first, fv.second)?.let { reused = true; it.items }
-                ?: runCatching { VScreenOcr.recognize(d.displayId, fv.first, fv.second, accurate = VScreenOcr.accurateEnabled()) }
-                    .getOrNull()?.takeIf { it.error == null }?.let { r ->
-                        val a11yTexts = runCatching { a11yF.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList()).map { it.label }
-                        VScreenPerception.offerReading(d.displayId, fv.first, fv.second, r, a11yTexts)
-                        r.items
-                    }
+                ?: run {
+                    // r45: the caller may have gone away while the frame was being read; stop before the (possibly
+                    // slow) OCR instead of doing work nobody waits for.
+                    if (Call.current()?.cancelled == true) throw BackgroundOperation.ActionError("CANCELLED", tr("调用方断开或取消了，OCR 没有做", "The caller disconnected or cancelled; OCR was not run"))
+                    runCatching { VScreenOcr.recognize(d.displayId, fv.first, fv.second, accurate = VScreenOcr.accurateEnabled()) }
+                        .getOrNull()?.takeIf { it.error == null }?.let { r ->
+                            // r45: ...and again after it — a reading nobody waits for is not offered to perception.
+                            if (Call.current()?.cancelled == true) throw BackgroundOperation.ActionError("CANCELLED", tr("调用方断开或取消了，读到的文字没有用", "The caller disconnected or cancelled; the reading was discarded"))
+                            val a11yTexts = runCatching { a11yF.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList()).map { it.label }
+                            VScreenPerception.offerReading(d.displayId, fv.first, fv.second, r, a11yTexts)
+                            r.items
+                        }
+                }
         }
         val raw = runCatching { a11yF.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList())
         val act = runCatching { actF.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()
