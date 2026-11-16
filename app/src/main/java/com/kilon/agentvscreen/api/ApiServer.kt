@@ -56,6 +56,10 @@ class ApiServer(private val ctx: Context) {
     private val TAG = "ApiServer"
     private val handler = VScreenOffloadHandler(ctx)
     private val pool = ThreadPoolExecutor(4, MAX_CONN, 30, TimeUnit.SECONDS, SynchronousQueue()) { r -> Thread(r, "vscreen-http").apply { isDaemon = true } }
+    /** r45 canary: how many pool workers are busy right now. */
+    val poolActive: Int get() = pool.activeCount
+    /** r45 canary: screen queue state (held, holder, hold ms). */
+    fun queueState(): Triple<Boolean, String?, Long> = VScreenOffloadHandler.queueState()
     /** Connections turned away because every worker was busy. */
     @Volatile var refused = 0L; private set
     /** Silent connections closed to make room for a new one. */
