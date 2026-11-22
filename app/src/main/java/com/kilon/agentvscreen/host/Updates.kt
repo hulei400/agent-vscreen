@@ -26,6 +26,30 @@ object Updates {
         class Failed(val why: String) : Outcome()
     }
 
+    /**
+     * 1.4.2 (rainbow): which releases count. STABLE: only full releases (no "-beta", not marked pre-release on GitHub);
+     * BETA: those and the pre-releases. Chosen in Settings; until chosen it follows this build (a beta build looks for
+     * betas, a release build for releases).
+     */
+    enum class Channel { STABLE, BETA }
+
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences("updates", Context.MODE_PRIVATE)
+
+    fun channel(ctx: Context): Channel = prefs(ctx).getString("channel", null)?.let { runCatching { Channel.valueOf(it) }.getOrNull() }
+        ?: if (BuildConfig.VERSION_NAME.contains('-')) Channel.BETA else Channel.STABLE
+
+    fun setChannel(ctx: Context, c: Channel) {
+        prefs(ctx).edit().putString("channel", c.name).putLong("checked_at", 0L).apply()
+        newer.value = null
+    }
+
+    /** Pure: is [r] on [c]? */
+    fun onChannel(r: Release, c: Channel): Boolean = c == Channel.BETA || (!r.prerelease && !r.version.contains('-'))
+
+    /** Pure: the newest release on [c] that is newer than [current], else null. */
+    fun pick(list: List<Release>, c: Channel, current: String): Release? =
+        list.filter { onChannel(it, c) }.maxWithOrNull { x, y -> compare(x.version, y.version) }?.takeIf { compare(it.version, current) > 0 }
+
     /** The newest release seen that is newer than this build (null: none, or not checked yet). */
     val newer = MutableStateFlow<Release?>(null)
     val checking = MutableStateFlow(false)
@@ -65,10 +89,11 @@ object Updates {
             val code = c.responseCode
             if (code != 200) return Outcome.Failed(tr("GitHub 回复 $code", "GitHub answered $code") + if (code == 403) tr("（查询太频繁，过一会儿再试）", " (too many checks, try again later)") else "")
             val list = parse(c.inputStream.bufferedReader().use { it.readText() })
-            ctx.getSharedPreferences("updates", Context.MODE_PRIVATE).edit().putLong("checked_at", System.currentTimeMillis()).apply()
-            val best = list.maxWithOrNull { x, y -> compare(x.version, y.version) }
-            return if (best != null && compare(best.version, BuildConfig.VERSION_NAME) > 0) { newer.value = best; Outcome.Newer(best) }
-            else { newer.value = null; Outcome.Latest(best?.version) }
+            prefs(ctx).edit().putLong("checked_at", System.currentTimeMillis()).apply()
+            val ch = channel(ctx)
+            val best = pick(list, ch, BuildConfig.VERSION_NAME)
+            return if (best != null) { newer.value = best; Outcome.Newer(best) }
+            else { newer.value = null; Outcome.Latest(list.filter { onChannel(it, ch) }.maxWithOrNull { x, y -> compare(x.version, y.version) }?.version) }
         } catch (e: Exception) {
             return Outcome.Failed(tr("连不上 GitHub（${e.javaClass.simpleName}）", "Could not reach GitHub (${e.javaClass.simpleName})"))
         } finally { checking.value = false }
@@ -76,7 +101,7 @@ object Updates {
 
     /** At most once a day, quietly (the app's home calls it when opened). */
     fun checkDaily(ctx: Context) {
-        val at = ctx.getSharedPreferences("updates", Context.MODE_PRIVATE).getLong("checked_at", 0L)
+        val at = prefs(ctx).getLong("checked_at", 0L)
         if (System.currentTimeMillis() - at < DAY_MS || checking.value) return
         Thread({ runCatching { check(ctx.applicationContext) } }, "vscreen-update-check").apply { isDaemon = true }.start()
     }

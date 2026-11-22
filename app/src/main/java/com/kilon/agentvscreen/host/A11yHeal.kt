@@ -53,7 +53,7 @@ object A11yHeal {
                 p(ctx).edit().putBoolean("a11y_needs_manual", false).putBoolean("a11y_blocked", false).apply()
             return
         }
-        if (!wanted(ctx) || blocked(ctx) || userOff(ctx) || !ShizukuManager.isReady()) return
+        if (!wanted(ctx) || blocked(ctx) || userOff(ctx) || !Privileged.isReady()) return
         val now = SystemClock.elapsedRealtime()
         if (lastTry != 0L && now - lastTry < MIN_GAP_MS) return
         lastTry = now

@@ -51,14 +51,8 @@ fun VScreenAppRules() {
 
     LaunchedEffect(Unit) {
         apps = withContext(Dispatchers.IO) {
-            runCatching {
-                val pm = ctx.packageManager
-                pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
-                    .map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
-                    .distinctBy { it.second }
-                    .filter { it.second != ctx.packageName }
-                    .sortedBy { it.first }
-            }.getOrDefault(emptyList())
+            // 1.4.2: from the catalog read once (AppCatalog).
+            com.kilon.agentvscreen.core.AppCatalog.launchable().map { it.label to it.pkg }
         }
         labels = apps.associate { it.second to it.first }
     }

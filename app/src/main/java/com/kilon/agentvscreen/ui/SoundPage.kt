@@ -48,12 +48,13 @@ fun SoundPage() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var tick by remember { mutableIntStateOf(0) }
-    var silent by remember { mutableStateOf<List<PlayAudio.Hit>?>(null) }
+    // 1.4.2: the last reading shows at once while a fresh one runs (it reads every package: seconds on a full phone).
+    var silent by remember { mutableStateOf<List<PlayAudio.Hit>?>(VScreenMute.lastSilenced) }
     var scanning by remember { mutableStateOf(true) }
     var msg by remember { mutableStateOf<String?>(null) }
     var picking by remember { mutableStateOf<Boolean?>(null) } // true: mute an app, false: an app that keeps its sound
     var screenMute by remember { mutableStateOf(VScreenMute.enabled) }
-    LaunchedEffect(tick) { scanning = true; silent = withContext(Dispatchers.IO) { VScreenMute.silenced() }; scanning = false }
+    LaunchedEffect(tick) { scanning = true; withContext(Dispatchers.IO) { VScreenMute.silenced() }?.let { silent = it }; scanning = false }
     fun label(p: String) = runCatching { ctx.packageManager.getApplicationLabel(ctx.packageManager.getApplicationInfo(p, 0)).toString() }.getOrDefault(p)
     fun said(c: VScreenMute.Change, done: String) = when {
         c.ok -> done

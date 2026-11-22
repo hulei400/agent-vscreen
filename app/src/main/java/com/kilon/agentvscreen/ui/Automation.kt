@@ -64,6 +64,7 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.platform.LocalView
 import com.kilon.agentvscreen.core.VScreenMap
 import com.kilon.agentvscreen.host.Wake
+import com.kilon.agentvscreen.steps
 import com.kilon.agentvscreen.tr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -382,7 +383,7 @@ internal fun LessonsList(tick: Int) {
                     }
                     Column(Modifier.weight(1f)) {
                         Text(s.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(tr("$count 步", "$count steps") + (if (s.uses > 0) tr(" · 用过 ${s.uses} 次", " · used ${s.uses}×") else "") +
+                        Text(steps(count) + (if (s.uses > 0) tr(" · 用过 ${s.uses} 次", " · used ${s.uses}×") else "") +
                             " · " + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.ROOT).format(java.util.Date(s.at)) + " · " + segmentSource(p, s),
                             fontSize = 12.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                     }

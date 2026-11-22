@@ -70,7 +70,7 @@ internal object VScreenPower {
 
     /** Grants the background exemptions through Shizuku. Returns (all-ok-after, what was done). */
     fun whitelist(ctx: Context): Pair<Boolean, String> {
-        if (ShizukuManager.snapshot.value.state != ShizukuManager.State.READY) return false to tr("Shizuku 不可用", "Shizuku unavailable")
+        if (!com.kilon.agentvscreen.host.Privileged.isReady()) return false to tr("${com.kilon.agentvscreen.host.Privileged.name()} 不可用", "${com.kilon.agentvscreen.host.Privileged.name()} unavailable")
         val pkg = ctx.packageName
         val uid = ctx.applicationInfo.uid.toString()
         val steps = listOf(
@@ -98,7 +98,7 @@ internal object VScreenPower {
 
     /** Kept for callers: now the same self-healing as [heal], in the background. Never throws. */
     fun ensureOnce(ctx: Context) {
-        if (ShizukuManager.snapshot.value.state != ShizukuManager.State.READY) return
+        if (!com.kilon.agentvscreen.host.Privileged.isReady()) return
         Thread { heal(ctx, "status") }.apply { isDaemon = true; name = "vscreen-power" }.start()
     }
 
@@ -118,7 +118,7 @@ internal object VScreenPower {
     fun heal(ctx: Context, why: String): Check {
         val before = runCatching { check(ctx) }.getOrNull() ?: return check(ctx)
         if (before.ok) { everOk = true; return before }
-        if (ShizukuManager.snapshot.value.state != ShizukuManager.State.READY) return before
+        if (!com.kilon.agentvscreen.host.Privileged.isReady()) return before
         synchronized(this) {
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastHealAt < 20_000L) return check(ctx)

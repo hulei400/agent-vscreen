@@ -288,7 +288,23 @@ internal fun mergeElements(d: VScreenDisplay, a11y: List<El>, ocr: List<VScreenO
 internal class Snap(val frame: Bitmap?, val version: Long, val items: List<VScreenOcr.Item>?, val els: List<El>,
                     val activity: String?, val ocrReused: Boolean, val mask: com.kilon.agentvscreen.core.Mask? = null,
                     /** Set when the words could not be read (both engines failed) or the accurate one fell back: said in 【注意】. */
-                    val ocrProblem: String? = null, val ocrFallback: String? = null)
+                    val ocrProblem: String? = null, val ocrFallback: String? = null,
+                    /** 1.4.2: set when the picture is an old one the screen could not refresh (asleep / parked): said in 【注意】. */
+                    val staleNote: String? = null)
+
+/**
+ * 1.4.2 (pure): whether the picture must be called old. No new frame since the look asked for one is normal for a still
+ * screen that is ON (nothing changed, the last frame is the screen as it is), so that alone says nothing. It matters
+ * when the screen could not draw: asleep, dozing or parked. Then the picture may no longer be what the app shows.
+ */
+internal fun staleFrameNote(lastFrameAtMs: Long, askedAtMs: Long, nowMs: Long, on: Boolean?, parked: Boolean): String? {
+    if (lastFrameAtMs <= 0L || lastFrameAtMs >= askedAtMs) return null
+    if (on != false && !parked) return null
+    val s = ((nowMs - lastFrameAtMs) / 1000).coerceAtLeast(0)
+    val why = if (parked) tr("副屏处于省电停放", "the screen is parked to save power") else tr("副屏在休眠", "the screen is asleep")
+    return tr("画面是 $s 秒前的旧画面（$why，没有产生新画面）：可能不是应用现在的样子，先 look 确认再动作",
+        "The picture is $s s old ($why and drew no new frame): it may not be what the app shows now; look again before acting")
+}
 
 private val snapPool = java.util.concurrent.Executors.newCachedThreadPool { r -> Thread(r, "vscreen-snap").apply { isDaemon = true } }
 
@@ -337,8 +353,10 @@ internal fun VScreenOffloadHandler.snapshot(d: VScreenDisplay, freshMs: Long = 1
         val after = d.latestWithVersion()
         val mask = VScreenPerception.mask(d.displayId)
         if (attempt == 0 && fv != null && after != null && after.second != fv.second && !samePicture(fv.first, after.first, mask)) { attempt++; continue }
+        val stale = staleFrameNote(d.lastFrameAtMs, t0, SystemClock.elapsedRealtime(),
+            com.kilon.agentvscreen.core.VScreenAwake.stateOf(d)?.let { it == android.view.Display.STATE_ON }, d.parked)
         return Snap(fv?.first, fv?.second ?: -1L, items, mergeElements(d, raw, items?.let { VScreenPerception.still(it, mask) }), act, reused, mask,
-            problem ?: VScreenOcr.downLine(null), fellBack)
+            problem ?: VScreenOcr.downLine(null), fellBack, stale)
     }
 }
 
@@ -612,6 +630,7 @@ internal fun VScreenOffloadHandler.fourBlocks(sid: String, d: VScreenDisplay, li
     com.kilon.agentvscreen.core.VScreenOwnership.takeNotes(sid).forEach { notes += it }
     com.kilon.agentvscreen.core.VScreenDownscale.takeNote(d.displayId)?.let { notes += it }
     snap.ocrProblem?.let { notes.add("OCR_DOWN", it) } ?: snap.ocrFallback?.let { notes += it }
+    snap.staleNote?.let { notes += it }
     VScreenPerception.blankFor(d.displayId)?.let { ms -> notes += tr("画面已连续 ${(ms / 100) / 10.0} 秒是一整片纯色（黑屏/白屏）", "The picture has been one solid color for ${(ms / 100) / 10.0} s (black / white screen)") }
     val sb = StringBuilder()
     sb.append(Blocks.done + "\n")

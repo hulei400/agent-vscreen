@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -57,6 +58,8 @@ fun SetupFlowPage() {
     val nav = LocalNav.current
     val scope = rememberCoroutineScope()
     val sh by ShizukuManager.snapshot.collectAsState()
+    val pv by com.kilon.agentvscreen.host.Privileged.snapshot.collectAsState()
+    val root = pv.via == com.kilon.agentvscreen.host.Privileged.Via.ROOT
     val skipped = remember { mutableStateListOf<String>() }
     var busy by remember { mutableStateOf(false) }
     var log by remember { mutableStateOf(emptyList<String>()) }
@@ -64,9 +67,14 @@ fun SetupFlowPage() {
     val todo = items.filter { !it.ok && it.key !in skipped }
     val step = todo.firstOrNull()
     fun refresh() = scope.launch { app.items = withContext(Dispatchers.IO) { runCatching { Setup.check(ctx) }.getOrDefault(app.items) } }
+    LaunchedEffect(sh) { refresh() }
+    fun choose(v: com.kilon.agentvscreen.host.Privileged.Via) = scope.launch {
+        withContext(Dispatchers.IO) { com.kilon.agentvscreen.host.Privileged.choose(ctx, v) }
+        kotlinx.coroutines.delay(600); refresh()
+    }
     fun open(i: Intent) { runCatching { ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.onFailure { host.say(tr("这台手机打不开这个设置页", "This phone cannot open that settings page")) } }
 
-    MiuixPage(tr("首次配置", "Setup"), subtitle = tr("只用 Shizuku，不占 adb", "Shizuku only, adb untouched")) {
+    MiuixPage(tr("首次配置", "Setup"), subtitle = if (root) tr("用 Root，不需要 Shizuku", "Root, no Shizuku needed") else tr("只用 Shizuku，不占 adb", "Shizuku only, adb untouched")) {
         if (items.isEmpty()) { Footnote(tr("正在检查…", "Checking…")); return@MiuixPage }
         // Progress: one dot per item, filled when done.
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -91,9 +99,13 @@ fun SetupFlowPage() {
                         fontSize = 13.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
                     Text(step.label, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
                     Text(step.detail, fontSize = 14.sp, lineHeight = 20.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, textAlign = TextAlign.Center)
-                    val ready = sh.state == ShizukuManager.State.READY
+                    val ready = pv.state == ShizukuManager.State.READY
+                    val starting = root && com.kilon.agentvscreen.host.RootBackend.phase == com.kilon.agentvscreen.host.RootBackend.Phase.STARTING
                     val (label, act) = when {
-                        step.key == "shizuku" -> when (sh.state) {
+                        step.key == "privilege" && root -> (if (starting) tr("启动中…", "Starting…") else tr("用 Root 启动", "Start with root")) to {
+                            choose(com.kilon.agentvscreen.host.Privileged.Via.ROOT); Unit
+                        }
+                        step.key == "privilege" -> when (sh.state) {
                             ShizukuManager.State.NOT_INSTALLED -> tr("安装 Shizuku", "Install Shizuku") to { ShizukuManager.openInstallPage(ctx) }
                             ShizukuManager.State.NOT_RUNNING -> tr("打开 Shizuku 启动它", "Open Shizuku to start it") to { ShizukuManager.openShizukuApp(ctx) }
                             else -> tr("授权 Shizuku", "Grant Shizuku") to { host.grantShizuku(); refresh(); Unit }
@@ -116,8 +128,15 @@ fun SetupFlowPage() {
                             })
                         }
                     }
-                    PrimaryButton(onClick = act, enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 6.dp), color = MiuixTheme.colorScheme.primary) {
+                    PrimaryButton(onClick = act, enabled = !busy && !starting, modifier = Modifier.fillMaxWidth().padding(top = 6.dp), color = MiuixTheme.colorScheme.primary) {
                         Text(label, color = MiuixTheme.colorScheme.onPrimary)
+                    }
+                    // 1.4.2-beta3: the other way in, one tap away; what each means is behind the "?".
+                    if (step.key == "privilege") Row(verticalAlignment = Alignment.CenterVertically) {
+                        LinkButton(onClick = { choose(if (root) com.kilon.agentvscreen.host.Privileged.Via.SHIZUKU else com.kilon.agentvscreen.host.Privileged.Via.ROOT) }) {
+                            Text(if (root) tr("改用 Shizuku", "Use Shizuku instead") else tr("手机已 root？改用 Root", "Rooted? Use root instead"))
+                        }
+                        Help(tr("Shizuku 和 Root", "Shizuku and root"), H.privilege)
                     }
                     if (step.key in OPTIONAL) LinkButton(onClick = { skipped += step.key }) { Text(tr("跳过这一步", "Skip this step")) }
                     if (step.key == "accessibility" && ready) Text(tr("无障碍只能由你在系统设置里打开。", "Only you can turn accessibility on, in system settings."),

@@ -342,7 +342,8 @@ object Tailnet {
         _status.value = _status.value.copy(running = true, error = null)
         AppLogger.info(TAG, "bridge started (pid-less child), host=${ApiConfig.tailnetHostname}")
         Thread({
-            p.errorStream.bufferedReader().forEachLine { l -> if (l.isNotBlank()) AppLogger.info(TAG, l.take(300)) }
+            // The stream is closed under this reader when the bridge is stopped or replaced: that is its normal end.
+            runCatching { p.errorStream.bufferedReader().forEachLine { l -> if (l.isNotBlank()) AppLogger.info(TAG, l.take(300)) } }
         }, "vscreen-tailnet-err").apply { isDaemon = true }.start()
         p.inputStream.bufferedReader().forEachLine { line ->
             val o = runCatching { JSONObject(line) }.getOrNull() ?: return@forEachLine

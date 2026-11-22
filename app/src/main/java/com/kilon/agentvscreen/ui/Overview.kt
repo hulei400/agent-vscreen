@@ -50,6 +50,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PanTool
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.runtime.Composable
@@ -271,8 +272,21 @@ private fun StageWords(s: BackgroundOperation.State, mode: Mode, last: TaskLog.T
 @Composable
 private fun StageActions(s: BackgroundOperation.State, live: Boolean, open: () -> Unit, off: Boolean, power: () -> Unit) {
     val c = MiuixTheme.colorScheme
+    val ctx = LocalContext.current
+    val host = LocalHost.current
+    var picking by remember { mutableStateOf(false) }
+    if (picking) AppPickerDialog(onDismiss = { picking = false }) { a ->
+        picking = false
+        host.say(tr("正在副屏打开 ${a.label}…", "Opening ${a.label} on the background screen…"))
+        Thread({
+            com.kilon.agentvscreen.core.ManualScreen.open(ctx.applicationContext, a.pkg)
+                .onSuccess { host.say(it); open() }.onFailure { host.say(it.message ?: tr("打开失败", "Could not open it")) }
+        }, "vscreen-manual-open").apply { isDaemon = true }.start()
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         if (off) { RoundAction(Icons.Filled.PowerSettingsNew, tr("打开服务", "Turn on"), c.primary) { power() }; return@Row }
+        // 1.4.2: the user opens an app on the screen themselves (no agent needed) when nothing runs on it.
+        if (!live) RoundAction(Icons.Filled.Apps, tr("打开应用", "Open app"), c.primary) { picking = true }
         RoundAction(Icons.Filled.PanTool, tr("接管", "Take over"), c.primary, enabled = live && !s.userStopped) {
             s.ownerSessionId?.let { BackgroundOperation.beginTakeover(it) }; open()
         }
@@ -337,12 +351,12 @@ private fun FixCard(problems: List<Readiness.Item>, setupLeft: Boolean) {
         first != null -> when (first.code) {
             "no_accessibility" -> tr("无障碍服务被关掉了", "Accessibility was turned off")
             "accessibility_cannot_see_display" -> tr("无障碍看不到副屏", "Accessibility cannot see the screen")
-            "no_privilege" -> tr("Shizuku 没有在运行", "Shizuku is not running")
+            "no_privilege" -> tr("${com.kilon.agentvscreen.host.Privileged.name()} 尚未就绪", "${com.kilon.agentvscreen.host.Privileged.name()} is not ready")
             "service_off" -> tr("服务关着", "The service is off")
             "frozen_in_background" -> tr("系统冻结了后台", "The system froze the app")
             else -> tr("有一项需要处理", "Something needs you")
         } to first.text
-        else -> tr("还差 ${app.left} 项配置", "${app.left} setup steps left") to tr("配好之后 agent 才能用副屏", "Agents can use the screen once it is set up")
+        else -> tr("还差 ${app.left} 项配置", if (app.left == 1) "1 setup step left" else "${app.left} setup steps left") to tr("配好之后 agent 才能用副屏", "Agents can use the screen once it is set up")
     }
     var busy by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(20.dp)) {
@@ -392,7 +406,7 @@ private fun FirstUse(setupLeft: Boolean) {
             val connected = agents.values.any { it.lastCallAt > 0 }
             val saved = agents.values.any { it.remembered }
             val steps = listOf(
-                tr("授权", "Permissions") to tr("Shizuku 和无障碍：让它能在后台开一块副屏", "Shizuku and accessibility: so it can open a background screen"),
+                tr("授权", "Permissions") to tr("Shizuku（或 Root）和无障碍：让它能在后台开一块副屏", "Shizuku (or root) and accessibility: so it can open a background screen"),
                 tr("接入一个 agent", "Connect an agent") to tr("起个名字，复制给它的话，发给它", "Name it, copy its message, send it"),
                 tr("它第一次连上", "Its first call") to tr("agent 照着那段话装好后会自己连上", "The agent sets itself up from the message and calls in"),
                 tr("它记下了说明", "It saved the note") to tr("以后的新对话里它也知道自己能用手机", "New conversations will know they can use the phone"),

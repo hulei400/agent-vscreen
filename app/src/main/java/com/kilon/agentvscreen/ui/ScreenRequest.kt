@@ -98,7 +98,7 @@ internal fun RequestCard(a: UserAsk.Ask?, session: String, recording: Boolean, p
     ) {
         val kind = a?.kind
         val head = when {
-            recording -> tr("示范中 · 已记 $steps 步", "Showing · $steps steps") + if (paused) tr(" · 已暂停", " · paused") else ""
+            recording -> tr("示范中 · 已记 $steps 步", "Showing · ${com.kilon.agentvscreen.steps(steps)}") + if (paused) tr(" · 已暂停", " · paused") else ""
             prep -> tr("准备：先走到起点", "Getting ready: go to the start")
             a == null -> ""
             kind == UserAsk.Kind.TEACH -> tr("「${a.tokenName}」请你演示", "\"${a.tokenName}\" asks you to show")
@@ -269,7 +269,7 @@ internal fun LessonStrip(session: String, k: Float, withHead: Boolean = false, o
                 }
             }
             is com.kilon.agentvscreen.cmd.Lesson.Recording -> {
-                if (withHead) Text(if (l.paused) tr("已暂停 · 现在的操作不记", "Paused · nothing is written down") else tr("录制中 · 已记 ${l.steps} 步", "Recording · ${l.steps} steps"),
+                if (withHead) Text(if (l.paused) tr("已暂停 · 现在的操作不记", "Paused · nothing is written down") else tr("录制中 · 已记 ${l.steps} 步", "Recording · ${com.kilon.agentvscreen.steps(l.steps)}"),
                     color = Color.White, fontSize = (12.5f * k).sp, fontWeight = FontWeight.SemiBold)
                 Text(l.askEnded?.let { tr("请求已结束（$it），录的会存为你的经验", "The request ended ($it); this is saved as your own") }
                     ?: if (l.paused) tr("暂停中，操作不会被记下。", "Paused: nothing is written down.")

@@ -91,7 +91,7 @@ internal object CommandSpec {
                 "  字里可写 *（任意字，整段字要对上：*蓝牙* 含蓝牙，共*条 以共开头以条结尾），text:/gone: 条件也一样；字@N = 从上往下第 N 处（@-1 最后一处）；字 +dx,+dy = 字旁边那一点（图标、开关）；坐标可写屏幕比例 50% 80%（换屏幕尺寸也点同一处）",
                 "  流程：try 一步 | try { 几步 }（没找到、没达到预期就跳过接着做）| if <条件> [最长] { … } [else { … } | else 一步]（看现在的画面，默认等 1.5s）| repeat 3 { … } | repeat [最多次数] { … } until <条件>（每轮后看，默认最多 10 次）。括号里可以换行、可以嵌套",
                 "  键名：back enter tab del space esc search menu up down left right paste copy cut page_up page_down，或数字 keycode（没有 home：副屏没有桌面）",
-                "每个动作后可加 until <条件> [or <条件>] [最长时长，默认 5s]；没写就等画面稳定（最多 3 秒；画面只剩循环小动画也算稳定）。",
+                "每个动作后可加 until <条件> [or <条件>] [最长时长，默认 5s]；没写就等画面稳定（最多 3 秒；画面只剩循环小动画也算稳定）；这次等待结束后（稳定了或到时间）画面和动作前一样时，再看最多 1.5 秒（type、编辑键和 --fast 的中间步骤不看），时刻从动作完成算起：变了就等它稳定，说“画面在动作 X 后才变化，Y 时稳定”（或“等到 Y 还在变”）；其间满足 --stop 条件就停在这一步，后面不做，不给 NO_CHANGE；仍没变才说“画面没有变化”（NO_CHANGE，只表示这段时间里没检测到变化）。",
                 "条件：text:字 | gone:字 | change[:x1,y1,x2,y2] | still[:区域]（完全不动）| stable（稳定，容许循环小动画）| color:x,y=#RRGGBB[~容差] | app:包名或界面名",
                 "一步没达到预期，这段就停在这一步，后面的不做，结果是失败（退出码 1，outcome=missed/refused）：",
                 "  until 到时间没等到；字画面上找不到；同样的字有好几处（AMBIGUOUS，会列出每一处的坐标，改用坐标）；#N 的元素已经不在原位（STALE_ELEMENT）；",
@@ -109,7 +109,7 @@ internal object CommandSpec {
                 "  words may hold * (any characters; the whole text must match: *Wi-Fi* holds Wi-Fi), in text:/gone: conditions too; words@N = the N-th place from the top (@-1 the last); words +dx,+dy = the point that far beside them (an icon, a switch); coordinates may be shares of the screen, 50% 80% (same place on any screen size)",
                 "  flow: try <step> | try { steps } (not found or not as expected: skip and go on) | if <condition> [max] { … } [else { … } | else <step>] (the screen as it is, waits up to 1.5 s by default) | repeat 3 { … } | repeat [at most] { … } until <condition> (checked after each round, at most 10 by default). Braces may span lines and nest",
                 "  keys: back enter tab del space esc search menu up down left right paste copy cut page_up page_down, or a numeric keycode (no home: the screen has no launcher)",
-                "After each action you may add until <condition> [or <condition>] [max duration, default 5s]; without it the picture is awaited to settle (up to 3 s; a picture left with only a small looping animation counts as settled).",
+                "After each action you may add until <condition> [or <condition>] [max duration, default 5s]; without it the picture is awaited to settle (up to 3 s; a picture left with only a small looping animation counts as settled); if after that wait (settled or timed out) it matches the picture before the action, it looks up to 1.5 s longer (not for type, edit keys or the in-between steps of --fast), timing from when the action finished: a change then is waited out and said as \"the screen changed late, X after the action, and settled at Y\" (or \"was still changing when time was up at Y\"); a --stop condition met meanwhile stops the stretch there, skips the rest and gives no NO_CHANGE; only a picture still unchanged is \"the screen did not change\" (NO_CHANGE: no change was seen in that time).",
                 "conditions: text:<word> | gone:<word> | change[:x1,y1,x2,y2] | still[:region] (no motion at all) | stable (settled, small looping animation allowed) | color:x,y=#RRGGBB[~tolerance] | app:<package or screen name>",
                 "A step that does not reach what it expects stops the stretch there, skips the rest, and the result is a failure (exit code 1, outcome=missed/refused):",
                 "  until timed out; text not found on the screen; the same text in several places (AMBIGUOUS, every place is listed with its point: use coordinates); the element of #N is no longer where it was (STALE_ELEMENT);",
@@ -216,9 +216,9 @@ internal object CommandSpec {
                 Opt("again", Kind.SWITCH, null, null, "请用户重新演示一遍（不加时，同一条 teach 已有结果就原样返回，不会再问用户）", "ask the user to show it again (without it, a teach that already has a result returns that result and does not ask again)")),
             screen = false, long = true, sumZh = "请用户在副屏上亲手演示一遍，存成可重放的一段", sumEn = "ask the user to show it once on the screen; saved as a segment you can replay"),
         Cmd("schedule", "[\"时间\"] | off <名字|all>", "[\"when\"] | off <name|all>",
-            listOf("预约你会来用手机的时间（定时任务用）：每个窗口开始前 3 分钟拉起服务、检查 Shizuku 和连接，没准备好就通知用户，结果作为事件发给本会话。不带参数列出预约和现在是否就绪。",
+            listOf("预约你会来用手机的时间（定时任务用）：每个窗口开始前 3 分钟拉起服务、检查所选的权限来源（Shizuku 或 Root）和连接，没准备好就通知用户，结果作为事件发给本会话。不带参数列出预约和现在是否就绪。",
                 "时间写法：\"07:00\"、\"07:00,19:30\"、\"weekdays 08:30\"、\"mon,wed,fri 21:00\"、\"every 2h from 08:00 to 22:00\"（间隔至少 30 分钟，最多 8 条）。"),
-            listOf("book the times you will use the phone (for timed tasks): 3 minutes before each window the service is started and Shizuku and the connection are checked; the user is notified if it is not ready, and the result is sent to this session as an event. With no argument: the schedules and whether it is ready now.",
+            listOf("book the times you will use the phone (for timed tasks): 3 minutes before each window the service is started, and the selected permission source (Shizuku or root) and the connection are checked; the user is notified if it is not ready, and the result is sent to this session as an event. With no argument: the schedules and whether it is ready now.",
                 "Times: \"07:00\", \"07:00,19:30\", \"weekdays 08:30\", \"mon,wed,fri 21:00\", \"every 2h from 08:00 to 22:00\" (at least 30 minutes apart, at most 8 entries)."),
             listOf(Opt("name", Kind.VALUE, "名字", "name", "预约的名字（同名会替换；默认 w1、w2…）", "the schedule's name (the same name replaces it; default w1, w2…)"),
                 Opt("for", Kind.DURATION, "时长", "duration", "每个窗口保持多久（默认 10m，最长 30m）", "how long each window stays up (default 10m, at most 30m)")),
@@ -291,7 +291,7 @@ internal object CommandSpec {
 
     private val head: String get() = tr(
         "vscreen — Agent-VScreen 后台操作：在看不见的副屏里操作其他应用，不占用户主屏。截图由你（调用方的模型）看，手机只报事实。\n" +
-            "不需要 adb 或无线调试：特权走 Agent-VScreen 自己的 Shizuku 通道。不要去连 adb、配无线调试或改 adb 密钥。没有副屏时直接 launch，会自动建屏。\n\n" +
+            "agent 不需要连接 adb 或配置无线调试：Agent-VScreen 使用用户选定的 Shizuku 或 Root。不要去连 adb、配无线调试或改 adb 密钥。没有副屏时直接 launch，会自动建屏。\n\n" +
             "怎么用（一个循环）：看（launch / act 返回的【现在】和截图）→ 做（act 一小段步骤，最后一步带 until 写明你期待看到什么）→ 核对（结果 ok 吗？【注意】里有什么？）。\n" +
             "一段里只放你有把握连着做的步骤；不确定页面会变成什么样时，在那里断开，先看再做。\n\n" +
             "返回的四段（launch / act / handoff in）：\n" +
@@ -302,7 +302,7 @@ internal object CommandSpec {
             "结果是否成功看 ok / 退出码，不用读文字判断：0 = 整段按预期做完；1 = 停在了某一步或被拒绝（code 说明原因）；2 = 命令写错了，什么都没做。\n" +
             "HTTP / MCP 返回的 JSON 里同样的内容是结构化的：steps[]（每步的状态）、screen.elements[]、notes[]（代码 + 文字）。\n\n命令：",
         "vscreen — Agent-VScreen background operation: operate other apps on an invisible background screen without taking the user's screen. You (the caller's model) look at the screenshots; the phone only reports facts.\n" +
-            "No adb or wireless debugging needed: privileges go through Agent-VScreen's own Shizuku channel. Don't connect adb, set up wireless debugging or change adb keys. With no screen, just launch: one is created automatically.\n\n" +
+            "Agents do not need adb or wireless debugging: Agent-VScreen uses Shizuku or root, whichever the user chose. Don't connect adb, set up wireless debugging or change adb keys. With no screen, just launch: one is created automatically.\n\n" +
             "How to use it (one loop): look (the [Now] block and screenshot returned by launch / act) → act (a short stretch of steps, the last one with until saying what you expect to see) → check (is the result ok? what is in [Notes]?).\n" +
             "Put in one stretch only the steps you are sure can follow each other; where you cannot tell what the page will become, break there and look before acting.\n\n" +
             "The four blocks returned (launch / act / handoff in):\n" +

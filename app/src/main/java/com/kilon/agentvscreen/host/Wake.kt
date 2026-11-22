@@ -397,9 +397,9 @@ object Wake {
         Thread({
             val t0 = SystemClock.elapsedRealtime()
             // Shizuku comes up after us after a boot, and binding takes a moment: give it a minute.
-            while (!ShizukuManager.isReady() && SystemClock.elapsedRealtime() - t0 < 60_000L) Thread.sleep(1_000)
+            while (!Privileged.isReady() && SystemClock.elapsedRealtime() - t0 < 60_000L) Thread.sleep(1_000)
             val did = ArrayList<String>()
-            if (ShizukuManager.isReady()) {
+            if (Privileged.isReady()) {
                 val r = runCatching { com.kilon.agentvscreen.core.VScreenShell.run(arrayOf("cmd", "deviceidle", "tempwhitelist", "-d", holdMs.toString(), ctx.packageName), 6_000L) }.getOrNull()
                 did += if (r?.exitCode == 0) tr("临时省电豁免 ${holdMs / 60_000} 分钟", "temporary power allowlist for ${holdMs / 60_000} min") else tr("临时省电豁免没成功", "temporary power allowlist failed")
                 quiet("wake-power") { com.kilon.agentvscreen.core.VScreenPower.heal(ctx, "wake") }

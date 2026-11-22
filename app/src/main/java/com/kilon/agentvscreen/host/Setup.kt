@@ -12,7 +12,7 @@ import com.kilon.agentvscreen.core.VScreenPower
 import com.kilon.agentvscreen.core.VScreenShell
 
 /**
- * First-run setup with as few taps as possible. Everything goes through Shizuku (a shared privileged channel that any
+ * First-run setup with as few taps as possible. Everything goes through Shizuku (or root, 1.4.2-beta3, [Privileged]) (a shared privileged channel that any
  * number of apps use at once): nothing here touches adb, wireless debugging, adbd or its port, so an agent that uses
  * adb itself keeps it. Each step only ADDS this app (to the accessibility list, the battery whitelist…) and never
  * removes or replaces what other apps have.
@@ -21,13 +21,17 @@ object Setup {
     data class Item(val key: String, val label: String, val ok: Boolean, val detail: String)
 
     fun check(ctx: Context): List<Item> {
+        val pv = Privileged.snapshot.value
         val sh = ShizukuManager.snapshot.value
         val pw = VScreenPower.heal(ctx, "setup check")
         return listOf(
-            Item("shizuku", tr("Shizuku 授权", "Shizuku permission"), sh.state == ShizukuManager.State.READY, when (sh.state) {
-                ShizukuManager.State.NOT_INSTALLED -> tr("没装 Shizuku（或 Sui）", "Shizuku (or Sui) is not installed")
-                ShizukuManager.State.NOT_RUNNING -> tr("Shizuku 没在运行：打开 Shizuku 启动它", "Shizuku is not running: open Shizuku to start it")
-                ShizukuManager.State.NEED_PERMISSION -> tr("点“授权 Shizuku”并允许", "Tap \"Grant Shizuku\" and allow")
+            // 1.4.2-beta3: one item for the way in, Shizuku or root, whichever the user chose.
+            if (pv.via == Privileged.Via.ROOT) Item("privilege", tr("Root 权限", "Root permission"), Privileged.isReady(),
+                if (Privileged.isReady()) pv.label else Privileged.notReadyHint())
+            else Item("privilege", tr("Shizuku 授权", "Shizuku permission"), sh.state == ShizukuManager.State.READY, when (sh.state) {
+                ShizukuManager.State.NOT_INSTALLED -> tr("没装 Shizuku（或 Sui）；手机有 root 也可以改用 Root", "Shizuku (or Sui) is not installed; a rooted phone can use root instead")
+                ShizukuManager.State.NOT_RUNNING -> ShizukuManager.missingBinderHint()
+                ShizukuManager.State.NEED_PERMISSION -> if (sh.denied) ShizukuManager.deniedHint() else tr("点“授权 Shizuku”并允许", "Tap \"Grant Shizuku\" and allow")
                 ShizukuManager.State.READY -> if (sh.isSui) "Sui" else "Shizuku v${sh.version}"
             }),
             Item("overlay", tr("悬浮窗", "Floating window"), Settings.canDrawOverlays(ctx), tr("副屏小窗（看进度、接管）", "The screen's small window (progress, take over)")),
@@ -36,8 +40,8 @@ object Setup {
             Item("battery", tr("电池优化和后台运行", "Battery optimization and background running"), pw.ok, when {
                 pw.ok && VScreenPower.resets > 0 -> tr("已加入电池白名单、允许后台运行（系统收回过 ${VScreenPower.resets} 次：${VScreenPower.lastResetWhat}，每次都已自动补上，不用你管）", "Battery exemption and background running granted (the system took them back ${VScreenPower.resets} times: ${VScreenPower.lastResetWhat}; each time they were granted again automatically, nothing to do)")
                 pw.ok -> tr("已加入电池白名单、允许后台运行（被系统收回时会自动补上）", "Battery exemption and background running granted (granted again automatically if the system takes them back)")
-                ShizukuManager.isReady() -> tr("自动设置没成功：", "Automatic setup failed: ") + pw.problems().joinToString(tr("、", ", ")) + tr("。请手动：", ". Please do it by hand: ") + VScreenPower.manualSteps()
-                else -> pw.problems().joinToString(tr("、", ", ")) + tr("（Shizuku 就绪后会自动补上）", " (granted automatically once Shizuku is ready)")
+                Privileged.isReady() -> tr("自动设置没成功：", "Automatic setup failed: ") + pw.problems().joinToString(tr("、", ", ")) + tr("。请手动：", ". Please do it by hand: ") + VScreenPower.manualSteps()
+                else -> pw.problems().joinToString(tr("、", ", ")) + tr("（${Privileged.name()} 就绪后会自动补上）", " (granted automatically once ${Privileged.name()} is ready)")
             }),
         ) + vendorItem(ctx)
     }
@@ -57,7 +61,7 @@ object Setup {
 
     /** Grant everything Shizuku can grant. Returns one line per step. */
     fun grantAll(ctx: Context): List<String> {
-        if (!ShizukuManager.isReady()) return listOf(tr("Shizuku 还没就绪：先授权 Shizuku", "Shizuku is not ready: grant Shizuku first"))
+        if (!Privileged.isReady()) return listOf(tr("${Privileged.name()} 还没就绪：", "${Privileged.name()} is not ready: ") + Privileged.notReadyHint())
         A11yHeal.want(ctx)
         val pkg = ctx.packageName
         val out = ArrayList<String>()

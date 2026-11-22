@@ -13,7 +13,7 @@ android {
         applicationId = "com.kilon.agentvscreen"
         minSdk = 30
         targetSdk = 35
-        versionCode = 21
+        versionCode = 22
         versionName = "1.4.2-fork"
         ndk { abiFilters += listOf("arm64-v8a") }
     }

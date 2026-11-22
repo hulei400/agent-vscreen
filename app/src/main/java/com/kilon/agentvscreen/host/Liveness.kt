@@ -254,6 +254,8 @@ object Liveness {
         .put("binder_ok", binderOk)
         .put("binder_ms", if (binderMs >= 0) binderMs else JSONObject.NULL)
         .put("previous_exit", ExitInfo.last ?: JSONObject.NULL)
+        .put("background_thread_deaths", com.kilon.agentvscreen.core.ThreadGuard.deaths)
+        .put("last_background_thread_death", com.kilon.agentvscreen.core.ThreadGuard.last ?: JSONObject.NULL)
 
     /**
      * Open the vendor page where an app is allowed to keep running in the background (launch manager / autostart);

@@ -7,6 +7,7 @@ import com.kilon.agentvscreen.host.UserAsk
 import com.kilon.agentvscreen.core.VScreenOcr
 import com.kilon.agentvscreen.core.VScreenShell
 import com.kilon.agentvscreen.core.VScreenMap
+import com.kilon.agentvscreen.steps
 import com.kilon.agentvscreen.tr
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -512,7 +513,7 @@ internal object Teach {
     private fun waitingNote(c: Context, res: Result) {
         val tap = android.app.PendingIntent.getActivity(c, 7790, com.kilon.agentvscreen.ui.Surface.reviewIntent(c),
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT, com.kilon.agentvscreen.ui.MainDisplay.options())
-        com.kilon.agentvscreen.core.VScreenHandoff.alert(c, NOTE_ID, tr("录好了 ${res.lines.size} 步，等你保存", "${res.lines.size} steps recorded, waiting to be saved"),
+        com.kilon.agentvscreen.core.VScreenHandoff.alert(c, NOTE_ID, tr("录好了 ${res.lines.size} 步，等你保存", "${steps(res.lines.size)} recorded, waiting to be saved"),
             tr("示教停在这里了，录下的步骤都在。点这里看一遍再保存。", "The lesson stopped here; the steps are kept. Tap to check them and save."), tap)
     }
     private const val NOTE_ID = 7791

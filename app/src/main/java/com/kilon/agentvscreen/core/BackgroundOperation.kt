@@ -461,11 +461,11 @@ object BackgroundOperation {
     fun refreshStatus() {
         val context = appContext ?: return
         val t0 = SystemClock.elapsedRealtime()
-        // r45: Shizuku state comes from the cache; a background thread refreshes it. The live pingBinder() used to run
+        // r45: privilege state comes from the cache; a background thread refreshes it. The live pingBinder() used to run
         // here (before every command dispatch) and a frozen Shizuku server blocked every command with no timeout.
         // The cache is at most one command stale (the async refresh runs on every call and the next call reads it).
-        ShizukuManager.refreshAsync()
-        val snap = ShizukuManager.snapshot.value
+        com.kilon.agentvscreen.host.Privileged.refreshAsync()
+        val snap = com.kilon.agentvscreen.host.Privileged.snapshot.value
         val priv = when (snap.state) {
             ShizukuManager.State.READY -> Privilege.READY
             ShizukuManager.State.NEED_PERMISSION -> Privilege.NOT_AUTHORIZED
@@ -486,7 +486,7 @@ object BackgroundOperation {
             if (next.connection == Connection.READY && priv != Privilege.READY) {
                 next = next.copy(
                     connection = Connection.ERROR,
-                    connectionError = tr("特权连接已断开（Shizuku ${priv.label()}）", "Privileged connection lost (Shizuku ${priv.label()})"),
+                    connectionError = tr("特权连接已断开（${com.kilon.agentvscreen.host.Privileged.name()} ${priv.label()}）", "Privileged connection lost (${com.kilon.agentvscreen.host.Privileged.name()} ${priv.label()})"),
                     needsExplicitReconnect = true,
                 )
             }
@@ -510,9 +510,7 @@ object BackgroundOperation {
         refreshStatus()
         val s = _state.value
         val error: String? = when (s.privilege) {
-            Privilege.NOT_INSTALLED -> tr("未安装 Shizuku：请用户安装并启动 Shizuku（或 Sui），再打开 Agent-VScreen 授权", "Shizuku is not installed: ask the user to install and start Shizuku (or Sui), then grant it in Agent-VScreen")
-            Privilege.NOT_RUNNING -> tr("Shizuku 服务未启动，请用无线调试启动后重试", "The Shizuku service is not running: start it (e.g. with wireless debugging) and retry")
-            Privilege.NOT_AUTHORIZED -> tr("Agent-VScreen 尚未获得 Shizuku 授权", "Agent-VScreen has no Shizuku permission yet")
+            Privilege.NOT_INSTALLED, Privilege.NOT_RUNNING, Privilege.NOT_AUTHORIZED -> com.kilon.agentvscreen.host.Privileged.notReadyHint()
             Privilege.READY -> {
                 val r = VScreenShell.run(arrayOf("id"), 5_000L)
                 if (r.exitCode != 0) tr("特权通道无响应：${r.combined.take(160)}", "The privileged channel does not answer: ${r.combined.take(160)}")
@@ -526,6 +524,16 @@ object BackgroundOperation {
         }
         AppLogger.info(TAG, "connect -> ${_state.value.connection} ${error ?: ""}")
         return _state.value
+    }
+
+    /**
+     * 1.4.2-beta3: the user switched the way in (Shizuku <-> root). The screen belongs to the old service, so it is
+     * released; the next command connects through the new one by itself (this is not a stop).
+     */
+    fun privilegeChanged() {
+        releaseScreen(tr("换了权限来源", "Permission source changed"))
+        _state.update { it.copy(connection = Connection.DISCONNECTED, connectionError = null, needsExplicitReconnect = false, operating = false) }
+        refreshStatus()
     }
 
     /** 停止并释放: stop operating, destroy the screen; reuse needs an explicit connect. */
@@ -623,6 +631,8 @@ object BackgroundOperation {
         // is released (before, it read a destroyed screen for up to 10 s and the end picture was blank).
         if (com.kilon.agentvscreen.cmd.Teach.lesson.value is com.kilon.agentvscreen.cmd.Lesson.Recording)
             runCatching { com.kilon.agentvscreen.cmd.Teach.endRecording(appContext, byDone = false, screenGone = true, endWaitMs = 800L) }
+        // 1.4.2: the open task keeps the screen as it is left (the home page's resting picture), before it goes.
+        _state.value.ownerSessionId?.let { TaskLog.captureNow(it) }
         val d = synchronized(lock) { display.also { display = null } } ?: return
         // Close whatever app was left on the screen so it does not hop to the
         // main display when its display disappears.
@@ -667,6 +677,7 @@ object BackgroundOperation {
     fun onTaskFinished(sessionId: String) {
         if (sessionId.isEmpty()) return
         synchronized(lock) { tasks.remove(sessionId); turns.remove(sessionId) }
+        TaskLog.captureNow(sessionId)
         TaskLog.onTurnEnd(sessionId, _state.value.userStopped)
         appContext?.let { c -> com.kilon.agentvscreen.host.UserAsk.withdrawSession(c, sessionId) }
         // 1.4.0-beta10: a lesson the user took is theirs to finish; the agent's turn ending does not end it (withdraw
@@ -721,6 +732,8 @@ object BackgroundOperation {
         _state.update { it.copy(userStopped = false, stoppedAt = 0L, takeoverSessionId = null) }
         if (s.takeoverSessionId != null) com.kilon.agentvscreen.cmd.Teach.onTakeoverEnded(appContext)
         AppLogger.info(TAG, "user allowed the AI to continue")
+        // 1.4.2: handing back the user's own screen ends their turn: it idles, and the next agent may take it over.
+        if (ManualScreen.isManual(s.ownerSessionId)) { ManualScreen.end(); return }
         // 1.3.0-beta16: the agent hears it (vscreen events) instead of finding out on its next call.
         if (s.takeoverSessionId != null || s.userStopped) s.ownerSessionId?.let { sid ->
             appContext?.let { c -> com.kilon.agentvscreen.host.quiet("handback-event") {
@@ -747,6 +760,12 @@ object BackgroundOperation {
             // dismiss it instead of only reporting "no screen".
             _state.update { it.copy(windowHidden = true, terminalPopAt = 0L) }
             return tr("小窗已收起", "Window hidden")
+        }
+        // 1.4.2: the user's own screen (opened from the app) closes when they close its window.
+        if (ManualScreen.isManual(owner)) {
+            _state.update { it.copy(windowHidden = false) }
+            ManualScreen.end { releaseScreen(tr("你关闭了自己打开的副屏", "You closed the screen you opened")) }
+            return tr("副屏已关闭", "Screen closed")
         }
         val turnRunning = synchronized(lock) { owner in turns }
         if (s.userStopped || !turnRunning) {
@@ -1132,7 +1151,10 @@ object BackgroundOperation {
     /** 1.1: BUSY says who owns the screen, when it will be free by itself, and how the owner frees it now. */
     private fun busy(owner: String?, sid: String): ActionError = com.kilon.agentvscreen.host.Needs.refused(sid, owner).let { busyError(owner) }
 
-    private fun busyError(owner: String?): ActionError = ActionError("BUSY",
+    private fun busyError(owner: String?): ActionError = if (ManualScreen.isManual(owner)) ActionError("BUSY",
+        data = org.json.JSONObject().put("owner", "user").put("frees_in_s", org.json.JSONObject.NULL),
+        message = tr("用户正在副屏上手动用应用（自己打开的）。等用户交还副屏后再用；不要催，也不要换别的办法绕开",
+            "The user is using an app on the background screen themselves (they opened it). Wait until they hand the screen back; don't press them or work around it")) else ActionError("BUSY",
         data = org.json.JSONObject().put("owner", owner ?: org.json.JSONObject.NULL)
             .put("frees_in_s", owner?.let { ownerFreesInMs(it) }?.let { (it + 999) / 1000 } ?: org.json.JSONObject.NULL),
         message =

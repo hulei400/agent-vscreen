@@ -111,10 +111,13 @@ object VScreenMute {
     data class Repair(val fixed: List<PlayAudio.Hit>, val failed: List<PlayAudio.Hit>, val denied: Boolean)
 
     /** Every silenced app of every user the shell can read (both records, read one by one: query-op misses them). */
+    /** 1.4.2: the last full reading, shown at once while the sound page reads again. */
+    @Volatile var lastSilenced: List<PlayAudio.Hit>? = null; private set
+
     fun silenced(): List<PlayAudio.Hit>? = runCatching {
         val r = VScreenShell.run(arrayOf("sh", "-c", PlayAudio.SCAN), 90_000L)
         PlayAudio.parseScan(r.combined).filter { PlayAudio.silent(it.modes) }.takeIf { r.combined.contains("@@") }
-    }.getOrNull()
+    }.getOrNull()?.also { lastSilenced = it }
 
     /**
      * 1.4.0-beta12, rebuilt in beta13 (rainbow: it reported success and the app stayed silent). Gives back EVERY app the

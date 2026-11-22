@@ -45,6 +45,8 @@ object ShizukuManager {
          * has no activity for. Never gate behaviour on it.
          */
         val isSui: Boolean = false,
+        /** NEED_PERMISSION and Shizuku denied the last request: the user's Deny or the maker's adb limit, see [deniedHint]. */
+        val denied: Boolean = false,
     )
 
     data class ProcessResult(
@@ -120,6 +122,28 @@ object ShizukuManager {
     /** First installed Shizuku-protocol manager package, or null. */
     fun installedManagerPackage(): String? = backend?.installedManagerPackage()
 
+    fun diagnostics(ctx: Context): String {
+        val b = backend ?: return "Shizuku: not initialized"
+        val manager = b.installedManagerPackage()
+        val version = manager?.let { runCatching { ctx.packageManager.getPackageInfo(it, 0).versionName }.getOrNull() }
+        val managed = ctx.getSystemService(android.os.UserManager::class.java)?.isManagedProfile
+        return "Shizuku: state=${b.snapshot().state} binder=${b.isBinderAlive()} permission=${b.isPermissionGranted()} " +
+            "manager=${manager ?: "none"} version=${version ?: "-"} appUid=${android.os.Process.myUid()} managedProfile=$managed"
+    }
+
+    fun missingBinderHint() = com.kilon.agentvscreen.tr(
+        "Shizuku 没在运行：手机重启后要在 Shizuku 里重新启动它。已经在运行的话，确认它和本应用在同一个用户或工作资料里。",
+        "Shizuku is not running: after a phone restart it must be started again in Shizuku. If it is running, check that it is in the same Android user or work profile as this app.",
+    )
+
+    /** The id of the latest permission request, so a delayed check can tell its own answer from a retry's. */
+    fun attempt(): Int = backend?.attempts?.current ?: 0
+
+    fun deniedHint() = com.kilon.agentvscreen.tr(
+        "Shizuku 没有授权。点了拒绝的话，再点“授权 Shizuku”并允许。如果 Shizuku 弹的是“adb 权限受限”，是手机系统限制了 adb（Shizuku 本身在运行）：",
+        "Shizuku did not grant. If you tapped Deny, tap \"Grant Shizuku\" again and allow. If Shizuku said \"adb permission limited\", the phone's system limits adb (Shizuku itself is running): ",
+    ) + com.kilon.agentvscreen.core.Vendor.of(com.kilon.agentvscreen.core.Vendor.keyOf(android.os.Build.MANUFACTURER, android.os.Build.BRAND)).adbLimitedFix() +
+        com.kilon.agentvscreen.tr("。改完在 Shizuku 里停止再重新启动它，再回来授权。", ". After changing it, stop and start Shizuku again, then come back and grant.")
     /** What happened, for the button to say so (it is never silent). The state is re-read either way. */
     fun requestPermission(): ShizukuBackend.Ask {
         val b = backend ?: return ShizukuBackend.Ask.NO_BINDER
@@ -173,7 +197,7 @@ object ShizukuManager {
         // screen entry + every listener callback, so logging unconditionally
         // floods logcat with NOT_RUNNING repeats.
         if (snap.state != prev.state || snap.version != prev.version ||
-            snap.uid != prev.uid || snap.isSui != prev.isSui
+            snap.uid != prev.uid || snap.isSui != prev.isSui || snap.denied != prev.denied
         ) {
             // [T-android-sui-support] provider= is the field to ask GH#110 /
             // GH#97 reporters for: it distinguishes a Sui-supplied binder from
@@ -184,7 +208,7 @@ object ShizukuManager {
             }
             AppLogger.info(
                 TAG,
-                "state=${snap.state} ver=${snap.version} uid=${snap.uid} provider=$provider ($reason)",
+                "state=${snap.state} ver=${snap.version} uid=${snap.uid} provider=$provider denied=${snap.denied} ($reason)",
             )
         }
     }

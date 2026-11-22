@@ -31,7 +31,7 @@ object Heal {
      * out first and put it back (re-binds a service that is on but sees nothing). Needs Shizuku.
      */
     fun accessibility(ctx: Context, restart: Boolean = false): Pair<Boolean, String> {
-        if (!ShizukuManager.isReady()) return false to tr("需要先修好 Shizuku（fix no_privilege），或请用户在 系统设置 › 无障碍 › 已安装的应用 › Agent-VScreen 手动打开",
+        if (!Privileged.isReady()) return false to tr("需要先修好 Shizuku（fix no_privilege），或请用户在 系统设置 › 无障碍 › 已安装的应用 › Agent-VScreen 手动打开",
             "Fix Shizuku first (fix no_privilege), or ask the user to turn it on in Settings › Accessibility › Installed apps › Agent-VScreen")
         val me = comp(ctx)
         val rest = enabledList().filter { it != me }
@@ -64,7 +64,7 @@ object Heal {
      */
     fun foreground(ctx: Context): Pair<Boolean, String> {
         if (Liveness.foreground) return true to tr("服务已是前台服务", "the service is a foreground service")
-        if (ShizukuManager.isReady()) power(ctx)
+        if (Privileged.isReady()) power(ctx)
         HostService.start(ctx.applicationContext)
         return if (waitFor(4_000) { Liveness.foreground }) true to tr("已把服务重新启动为前台服务", "restarted the service as a foreground service")
         else false to tr("系统不让后台启动前台服务：请用户打开一次 Agent-VScreen", "the system won't start a foreground service from the background: ask the user to open Agent-VScreen once")

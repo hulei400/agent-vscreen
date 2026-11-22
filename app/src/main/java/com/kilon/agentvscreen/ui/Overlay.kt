@@ -1,5 +1,6 @@
 package com.kilon.agentvscreen.ui
 
+import com.kilon.agentvscreen.steps
 import com.kilon.agentvscreen.tr
 
 import androidx.compose.foundation.border
@@ -224,12 +225,7 @@ object Overlay {
         val l = lp ?: return
         if (docked.value) return
         val sh = screenH().toFloat(); val h = groupH()
-        val lo = topMargin().coerceAtMost(sh - h)
-        val hi = (sh - h - bottomMargin()).coerceAtLeast(0f)
-        // The group (picture + card) can grow taller than the screen; then lo > hi and
-        // coerceIn would throw "Cannot coerce value to an empty range" and crash the process
-        // (killed the accessibility service twice on 2026-11-19 08:09/08:11). Clamp the range.
-        val y = l.y.toFloat().coerceIn(minOf(lo, hi), maxOf(lo, hi))
+        val y = l.y.toFloat().clampIn(topMargin().coerceAtMost(sh - h), (sh - h - bottomMargin()).coerceAtLeast(0f))
         if (y.toInt() != l.y) animateTo(l.x, y.toInt(), ms = ms)
     }
     /** How long the card takes to grow in or out; the window's glide uses the same time and easing. */
@@ -333,7 +329,7 @@ object Overlay {
         // A landscape screen on an upright phone may use almost the whole width: it is short, and anything narrower
         // makes its text unreadable.
         val max = minOf(screenW() * (if (a > 1f) 0.94f else 0.85f), screenH() * 0.85f * a)
-        return w.coerceIn(dp(120f).coerceAtMost(max), max)
+        return w.clampIn(dp(120f).coerceAtMost(max), max)
     }
 
     /**
@@ -377,8 +373,8 @@ object Overlay {
             // wider window (landscape, or a larger default) used to open partly off the right edge.
             val w = (widthPx.floatValue + dp(14f)).toInt()
             val h = (widthPx.floatValue / aspect() + dp(14f)).toInt()
-            l.x = l.x.coerceIn(0, (screenW() - w).coerceAtLeast(0))
-            l.y = l.y.coerceIn(topMargin().toInt(), (screenH() - h - bottomMargin().toInt()).coerceAtLeast(topMargin().toInt()))
+            l.x = l.x.clampIn(0, (screenW() - w).coerceAtLeast(0))
+            l.y = l.y.clampIn(topMargin().toInt(), (screenH() - h - bottomMargin().toInt()).coerceAtLeast(topMargin().toInt()))
         }
         lp = l
         val g = GestureFrame(c)
@@ -432,8 +428,8 @@ object Overlay {
     /** Move the window the least needed to have all of it on screen. */
     internal fun keepOnScreen() {
         val l = lp ?: return
-        val x = l.x.coerceIn(0, (screenW() - winW()).toInt().coerceAtLeast(0))
-        val y = l.y.coerceIn(topMargin().toInt(), (screenH() - winH() - bottomMargin()).toInt().coerceAtLeast(topMargin().toInt()))
+        val x = l.x.clampIn(0, (screenW() - winW()).toInt().coerceAtLeast(0))
+        val y = l.y.clampIn(topMargin().toInt(), (screenH() - winH() - bottomMargin()).toInt().coerceAtLeast(topMargin().toInt()))
         if (x != l.x || y != l.y) { place(x, y); save() }
     }
 
@@ -449,7 +445,7 @@ object Overlay {
 
     internal fun place(x: Int, y: Int) {
         val v = root ?: return; val l = lp ?: return
-        l.x = x; l.y = y.coerceIn(if (docked.value) 0 else -(winH() * 0.6f).toInt(), screenH() - dp(48f).toInt())
+        l.x = x; l.y = y.clampIn(if (docked.value) 0 else -(winH() * 0.6f).toInt(), screenH() - dp(48f).toInt())
         if (!placeQueued) { placeQueued = true; v.postOnAnimation(applyPlace) }
     }
 
@@ -527,8 +523,8 @@ object Overlay {
             else -> null
         }
         if (side != null) { foldInto(side, fingerY, vx); return }
-        val x = px.coerceIn(0f, (sw - w).coerceAtLeast(0f))
-        val y = py.coerceIn(topMargin().coerceAtMost(sh - h), (sh - h - bottomMargin()).coerceAtLeast(0f))
+        val x = px.clampIn(0f, (sw - w).coerceAtLeast(0f))
+        val y = py.clampIn(topMargin().coerceAtMost(sh - h), (sh - h - bottomMargin()).coerceAtLeast(0f))
         animateTo(x.toInt(), y.toInt())
     }
 
@@ -536,7 +532,7 @@ object Overlay {
         val l = lp ?: return
         stopAnim()
         docked.value = true; dockRight.value = right
-        val ty = (y ?: l.y).coerceIn(topMargin().toInt(), (screenH() - dp(TAB_H) - bottomMargin()).toInt())
+        val ty = (y ?: l.y).clampIn(topMargin().toInt(), (screenH() - dp(TAB_H) - bottomMargin()).toInt())
         place(if (right) screenW() - dp(TAB_W).toInt() else 0, ty)
         save()
     }
@@ -569,7 +565,7 @@ object Overlay {
 
     /** A duration whose opening speed matches [v] px/s (DecelerateInterpolator(1) starts at twice the mean speed). */
     private fun slideMs(dist: Float, v: Float): Long =
-        if (abs(v) < 1f) 220L else (2f * abs(dist) / abs(v) * 1000f).toLong().coerceIn(120L, 260L)
+        if (abs(v) < 1f) 220L else (2f * abs(dist) / abs(v) * 1000f).toLong().clampIn(120L, 260L)
 
     /** Released half past a side edge (or flung there): slide into that edge and become the tab there. */
     private fun foldInto(right: Boolean, fingerY: Float?, vx: Float) {
@@ -577,8 +573,8 @@ object Overlay {
         val sh = screenH().toFloat(); val w = winW(); val h = winH(); val tabH = dp(TAB_H)
         // The tab sits where the finger let go, but never outside the window's own height (no jump up or down);
         // only the screen's margins may move it, and then the window slides by the same amount.
-        val within = ((fingerY ?: (l.y + h / 2)) - tabH / 2).coerceIn(l.y.toFloat(), (l.y + h - tabH).coerceAtLeast(l.y.toFloat()))
-        val ty = within.coerceIn(topMargin(), sh - tabH - bottomMargin())
+        val within = ((fingerY ?: (l.y + h / 2)) - tabH / 2).clampIn(l.y.toFloat(), (l.y + h - tabH).coerceAtLeast(l.y.toFloat()))
+        val ty = within.clampIn(topMargin(), sh - tabH - bottomMargin())
         val x0 = l.x.toFloat(); val y0 = l.y.toFloat()
         val x1 = stripX(right, w); val y1 = y0 + (ty - within)
         val v = content()
@@ -590,7 +586,7 @@ object Overlay {
         a.interpolator = android.view.animation.DecelerateInterpolator(1f)
         a.addUpdateListener {
             val t = it.animatedValue as Float
-            v.alpha = 1f - 0.35f * ((t - 0.6f) / 0.4f).coerceIn(0f, 1f)
+            v.alpha = 1f - 0.35f * ((t - 0.6f) / 0.4f).clampIn(0f, 1f)
             place((x0 + (x1 - x0) * t).roundToInt(), (y0 + (y1 - y0) * t).roundToInt())
         }
         a.addListener(object : android.animation.AnimatorListenerAdapter() {
@@ -618,7 +614,7 @@ object Overlay {
     internal fun dockLive(right: Boolean, fingerY: Float, give: Float) {
         stopAnim()
         if (!docked.value || dockRight.value != right) { if (!docked.value) swapFade(); docked.value = true; dockRight.value = right }
-        val ty = (fingerY - dp(TAB_H) / 2).coerceIn(topMargin(), screenH() - dp(TAB_H) - bottomMargin())
+        val ty = (fingerY - dp(TAB_H) / 2).clampIn(topMargin(), screenH() - dp(TAB_H) - bottomMargin())
         place(if (right) (screenW() - dp(TAB_W) - give).toInt() else give.toInt(), ty.toInt())
     }
 
@@ -649,7 +645,7 @@ object Overlay {
         val w = widthPx.floatValue + 2 * pad()
         val h = groupH()
         // The tab stays a third of the way down the window, as when it folded.
-        val y = (l.y + dp(TAB_H) / 2 - h * 0.3f).coerceIn(topMargin(), (screenH() - h - bottomMargin()).coerceAtLeast(topMargin()))
+        val y = (l.y + dp(TAB_H) / 2 - h * 0.3f).clampIn(topMargin(), (screenH() - h - bottomMargin()).coerceAtLeast(topMargin()))
         val x = (if (right) screenW() - w - dp(8f) else dp(8f)).coerceAtLeast(0f)
         val v = content()
         v?.animate()?.cancel(); v?.alpha = 0f
@@ -658,7 +654,7 @@ object Overlay {
         save()
         if (v == null || !animateLook) { v?.alpha = 1f; return }
         swapFade {
-            v.pivotX = if (right) w else 0f; v.pivotY = (l.y + dp(TAB_H) / 2 - y).coerceIn(0f, h)
+            v.pivotX = if (right) w else 0f; v.pivotY = (l.y + dp(TAB_H) / 2 - y).clampIn(0f, h)
             v.scaleX = 0.82f; v.scaleY = 0.82f
             v.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180L)
                 .setInterpolator(android.view.animation.DecelerateInterpolator(1.6f)).start()
@@ -695,8 +691,8 @@ internal fun pictureToScreen(lx: Float, ly: Float, frame: RectF): Pair<Int, Int>
     val s = BackgroundOperation.state.value
     val d = s.ownerSessionId?.let { BackgroundOperation.previewDisplayFor(it) } ?: return null
     if (frame.width() <= 0f || !frame.contains(lx, ly)) return null
-    val x = ((lx - frame.left) / frame.width() * d.width).roundToInt().coerceIn(0, d.width - 1)
-    val y = ((ly - frame.top) / frame.height() * d.height).roundToInt().coerceIn(0, d.height - 1)
+    val x = ((lx - frame.left) / frame.width() * d.width).roundToInt().clampIn(0, d.width - 1)
+    val y = ((ly - frame.top) / frame.height() * d.height).roundToInt().clampIn(0, d.height - 1)
     return x to y
 }
 
@@ -843,7 +839,7 @@ private class GestureFrame(ctx: Context) : FrameLayout(ctx) {
                             if (inward > Overlay.dp(72f)) {
                                 Overlay.undockAt(raw.x, raw.y)
                                 downRaw = raw; winX = Overlay.lp?.x ?: 0; winY = Overlay.lp?.y ?: 0
-                            } else Overlay.dockLive(right, raw.y, (inward - Overlay.dp(Overlay.TAB_W)).coerceIn(0f, Overlay.dp(16f)))
+                            } else Overlay.dockLive(right, raw.y, (inward - Overlay.dp(Overlay.TAB_W)).clampIn(0f, Overlay.dp(16f)))
                         } else {
                             val d = raw - downRaw
                             Overlay.place(winX + d.x.roundToInt(), winY + d.y.roundToInt())
@@ -1015,7 +1011,7 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     val h = w / Overlay.aspect()
     // 1.4.0-beta4: the controls scale with the window's short side. Scaled by the width, a landscape window (wide,
     // short) got the largest controls over the smallest picture height; now both orientations get the same size.
-    val k = (minOf(w.value, h.value) / 200f).coerceIn(0.75f, 1.15f)
+    val k = (minOf(w.value, h.value) / 200f).clampIn(0.75f, 1.15f)
     val corner = (14 + 6 * k).dp
 
     var left by remember { mutableLongStateOf(-1L) }
@@ -1193,7 +1189,7 @@ private fun PictureLayer(owner: String, k: Float, picture: (@Composable (String)
             val down = awaitFirstDown(requireUnconsumed = false)
             Overlay.pictureDown = true
             val frame = RectF(0f, 0f, size.width.toFloat(), size.height.toFloat())
-            fun screen(p: Offset) = pictureToScreen(p.x.coerceIn(0f, frame.right - 1f), p.y.coerceIn(0f, frame.bottom - 1f), frame)
+            fun screen(p: Offset) = pictureToScreen(p.x.clampIn(0f, frame.right - 1f), p.y.clampIn(0f, frame.bottom - 1f), frame)
             val st = BackgroundOperation.state.value
             val taken = st.takeoverSessionId != null && st.takeoverSessionId == st.ownerSessionId
             if (taken) {
@@ -1226,7 +1222,7 @@ private fun PictureLayer(owner: String, k: Float, picture: (@Composable (String)
                         val ev = withTimeoutOrNull(16L) { awaitPointerEvent() }
                         if (Overlay.frameClaimed) break
                         if (!held) {
-                            hold = ((SystemClock.uptimeMillis() - t0 - 100L) / 400f).coerceIn(0f, 1f)
+                            hold = ((SystemClock.uptimeMillis() - t0 - 100L) / 400f).clampIn(0f, 1f)
                             if (hold >= 1f) {
                                 held = true; hold = 0f; Overlay.pictureHeld = true
                                 if (BackgroundOperation.state.value.userStopped) BackgroundOperation.userResume()

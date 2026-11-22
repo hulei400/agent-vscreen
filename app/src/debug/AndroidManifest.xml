@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only (CI device tests): never in a release APK. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Only the shell (adb) holds DUMP among normal callers, so no app on the phone can send this. -->
+        <receiver android:name=".CiHook" android:exported="true" android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.kilon.agentvscreen.CI_SEED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

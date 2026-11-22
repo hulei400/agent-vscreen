@@ -111,5 +111,47 @@ class V120CoreTest {
         assertTrue(Vendor.of("vivo").hints().isNotEmpty())
         assertTrue(Vendor.of("nobody").hints().isEmpty())
         assertTrue(Vendor.of("nobody").downscaleHint().isNotEmpty())
+        assertTrue(Vendor.of("oppo").adbLimitedFix().contains("切成英文"))
+        assertTrue(Vendor.of("oppo").adbLimitedFix().contains("“权限监控”，要关闭"))
+        assertTrue(Vendor.of("oppo").adbLimitedFix().contains("shizuku.rikka.app"))
+        assertTrue(Vendor.of("oppo").adbLimitedFix().contains("Disable permission monitoring"))
+        assertTrue(Vendor.of("xiaomi").adbLimitedFix().contains("安全设置"))
+        assertTrue(Vendor.of("nobody").adbLimitedFix().isNotEmpty())
+        assertEquals(Vendor.of("nobody").adbLimitedFix(), Vendor.of("vivo").adbLimitedFix())
+    }
+
+    @Test fun aDenialBelongsToItsRequestAndARetryForgetsIt() {
+        val a = com.kilon.agentvscreen.host.ShizukuBackend.Attempts()
+        assertFalse(a.lastDenied)
+        assertFalse(a.answered(a.codeOf(1), granted = false))
+        val first = a.start(); assertTrue(a.answered(a.codeOf(first), granted = false))
+        assertTrue(a.lastDenied)
+        val retry = a.start()
+        assertFalse(a.lastDenied)
+        assertEquals(retry, a.current)
+        assertTrue(a.answered(a.codeOf(retry), granted = false))
+        assertTrue(a.lastDenied)
+        val granted = a.start(); assertTrue(a.answered(a.codeOf(granted), granted = true))
+        assertFalse(a.lastDenied)
+    }
+
+    @Test fun aLateAnswerToAnOlderRequestIsNotTheRetrysAnswer() {
+        val a = com.kilon.agentvscreen.host.ShizukuBackend.Attempts()
+        val first = a.start()
+        val retry = a.start()
+        assertFalse(a.answered(a.codeOf(first), granted = false))
+        assertFalse(a.lastDenied)
+        assertEquals(retry, a.current)
+        assertTrue(a.answered(a.codeOf(retry), granted = false))
+        assertTrue(a.lastDenied)
+    }
+
+    @Test fun aNewBinderEndsTheRequestAndItsChecks() {
+        val a = com.kilon.agentvscreen.host.ShizukuBackend.Attempts()
+        val asked = a.start()
+        a.invalidate()
+        assertTrue(a.current != asked)
+        assertFalse(a.answered(a.codeOf(asked), granted = false))
+        assertFalse(a.lastDenied)
     }
 }

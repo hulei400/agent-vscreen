@@ -140,8 +140,11 @@ class VScreenDisplayService : Binder {
         runCatching { if (lock?.isHeld == true) lock.release() }
     }
 
-    constructor() : super() { base = null }
-    constructor(context: Context) : super() { base = context }
+    constructor() : super() { base = null; guardThreads() }
+    constructor(context: Context) : super() { base = context; guardThreads() }
+
+    /** 1.4.2: in the Shizuku process too, a helper thread's exception must not take the screens down with it. */
+    private fun guardThreads() = ThreadGuard.install({ System.err.println("vscreen-service: $it") })
 
     /**
      * 1.4.0-beta11: the sound of apps on the background screen is owned HERE, not by the app (rainbow 2026-11-17: after
@@ -173,7 +176,12 @@ class VScreenDisplayService : Binder {
             runCatching {
                 val f = java.io.File(FILE)
                 if (muted.isEmpty()) f.delete()
-                else f.writeText(org.json.JSONObject().apply { muted.forEach { (k, v) -> put(k, v) } }.toString())
+                else {
+                    f.writeText(org.json.JSONObject().apply { muted.forEach { (k, v) -> put(k, v) } }.toString())
+                    // 1.4.2-beta3: written by a root service, it must stay the shell's, or a later Shizuku service
+                    // (the shell) could not update it.
+                    if (android.os.Process.myUid() == 0) runCatching { android.system.Os.chown(FILE, 2000, 2000) }
+                }
             }
         }
 
@@ -275,7 +283,7 @@ class VScreenDisplayService : Binder {
             System.exit(0)
             return true
         }
-        if (code !in CREATE..INJECT_COMBO) return super.onTransact(code, data, reply, flags)
+        if (code !in CREATE..EXEC) return super.onTransact(code, data, reply, flags)
         data.enforceInterface(DESCRIPTOR)
         val out = reply ?: return true
         try {
@@ -312,7 +320,18 @@ class VScreenDisplayService : Binder {
                         else -> { val l = sound.list(); out.writeInt(0); out.writeInt(l.size); l.forEach { out.writeString(it) } }
                     }
                 }
-                PING -> { out.writeInt(0); out.writeInt(android.os.Process.myUid()) }
+                // 1.4.2-beta3: the protocol follows the uid, so a launcher that adopts a running service (root) can tell
+                // whether it is this build's. Older readers read the uid only.
+                PING -> { out.writeInt(0); out.writeInt(android.os.Process.myUid()); out.writeInt(PROTOCOL) }
+                EXEC -> {
+                    val argv = data.createStringArray() ?: error("missing argv")
+                    val env = data.createStringArray()
+                    val cwd = data.readString()
+                    val timeoutMs = data.readLong()
+                    val o = android.os.ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                    val e = android.os.ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                    out.writeInt(0); out.writeInt(exec(argv, env, cwd, timeoutMs, o, e))
+                }
                 INJECT_KEY -> {
                     val id = data.readInt(); val key = data.readInt(); val longPress = data.readInt() != 0
                     out.writeInt(0); out.writeInt(if (injectKey(id, key, longPress)) 1 else 0)
@@ -507,6 +526,37 @@ class VScreenDisplayService : Binder {
             @Suppress("DEPRECATION")
             return pc.readParcelable<android.os.Parcelable>(Class.forName("android.aps.IHwApsManager").classLoader)
         } finally { pc.recycle() }
+    }
+
+    // ── commands (root way in) ────────────────────────────────────────────
+
+    private fun exec(
+        argv: Array<String>, env: Array<String>?, cwd: String?, timeoutMs: Long,
+        stdout: android.os.ParcelFileDescriptor, stderr: android.os.ParcelFileDescriptor,
+    ): Int {
+        val o = android.os.ParcelFileDescriptor.AutoCloseOutputStream(stdout)
+        val e = android.os.ParcelFileDescriptor.AutoCloseOutputStream(stderr)
+        val p = try {
+            val pb = ProcessBuilder(*argv)
+            if (cwd != null) pb.directory(java.io.File(cwd))
+            if (env != null) pb.environment().apply { clear(); env.forEach { kv -> val i = kv.indexOf('='); if (i > 0) put(kv.substring(0, i), kv.substring(i + 1)) } }
+            pb.start()
+        } catch (t: Throwable) {
+            runCatching { e.write("${t.javaClass.simpleName}: ${t.message}\n".toByteArray()) }
+            runCatching { o.close() }; runCatching { e.close() }
+            return 127
+        }
+        fun pump(from: java.io.InputStream, to: java.io.OutputStream, name: String) = Thread {
+            runCatching { from.use { i -> to.use { i.copyTo(it) } } }
+        }.apply { isDaemon = true; this.name = name; start() }
+        val t1 = pump(p.inputStream, o, "vscreen-exec-out")
+        val t2 = pump(p.errorStream, e, "vscreen-exec-err")
+        runCatching { p.outputStream.close() }
+        val done = runCatching { p.waitFor(timeoutMs.coerceAtLeast(1L), java.util.concurrent.TimeUnit.MILLISECONDS) }.getOrDefault(false)
+        if (!done) runCatching { p.destroyForcibly() }
+        t1.join(2_000); t2.join(2_000)
+        runCatching { o.close() }; runCatching { e.close() }
+        return if (done) p.exitValue() else 124
     }
 
     // ── input injection ───────────────────────────────────────────────────
@@ -888,6 +938,13 @@ class VScreenDisplayService : Binder {
         const val SOUND = FIRST_CALL_TRANSACTION + 18
         /** 1.4.0-beta13 (protocol 12): in displayId, keyCode, n, n x modifier keyCode  out: status, injected(0/1). */
         const val INJECT_COMBO = FIRST_CALL_TRANSACTION + 19
+        /**
+         * 1.4.2-beta3 (protocol 13): run a command as this service's user (shell, or root's shell), for the root way
+         * in, which has no Shizuku to spawn processes. in argv[], env[]|null, cwd|null, timeoutMs, stdout fd, stderr fd
+         * (write ends of the caller's pipes; the output streams there, so its size has no binder limit)
+         * out: status, exit code (124 = timed out, the coreutils convention).
+         */
+        const val EXEC = FIRST_CALL_TRANSACTION + 20
         /** Apps the service silenced, so a service that was killed gives them back on its next start. Shell-owned. */
         const val FILE = "/data/local/tmp/agent-vscreen-muted.json"
         /** "allow" / "ignore" / "default" … as `appops get` says it, or null when it cannot be read. */
@@ -899,7 +956,7 @@ class VScreenDisplayService : Binder {
         /** A display nobody touched for this long (app gone) is released. */
         const val ORPHAN_MS = 20 * 60_000L
         /** Bump when the protocol changes, so Shizuku restarts an old service process. */
-        const val PROTOCOL = 12
+        const val PROTOCOL = 13
         /** Shizuku's reserved "destroy user service" transaction. */
         const val DESTROY_CODE = 16777115
         private const val SHELL_PKG = "com.android.shell"

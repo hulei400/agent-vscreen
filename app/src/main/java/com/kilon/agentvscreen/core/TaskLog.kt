@@ -160,10 +160,29 @@ object TaskLog {
         worker.execute { runCatching { capture(t) } }
     }
 
+    /**
+     * 1.4.2: the picture as the turn ends, taken now on the caller's thread (the screen is still there). Before, a task
+     * kept only the pictures taken after its commands, so the home page's resting picture was the screen as it was at
+     * the last command (or a task before it), not as it was left.
+     */
+    fun captureNow(session: String) {
+        val t = synchronized(this) { open[session] } ?: return
+        val d = BackgroundOperation.previewDisplayFor(t.session) ?: return
+        // Only the copy is taken here (callers may be on the main thread); the file is written on the log's worker,
+        // which writes the task's record after it (same single thread), so the record lists this picture.
+        val copy = d.latestFrame()?.takeIf { !it.isRecycled && it.width > 0 }
+            ?.let { runCatching { it.copy(it.config ?: android.graphics.Bitmap.Config.ARGB_8888, false) }.getOrNull() } ?: return
+        worker.execute { try { runCatching { writeFrame(t, copy) } } finally { copy.recycle() } }
+    }
+
     private fun capture(t: Task) {
         val d = BackgroundOperation.previewDisplayFor(t.session) ?: return
         VScreenShell.topPackage(d.displayId)?.let { p -> if (p !in VScreenShell.protectedPackages) t.pkg = p }
         val bmp = d.latestFrame()?.takeIf { !it.isRecycled && it.width > 0 } ?: return
+        writeFrame(t, bmp)
+    }
+
+    private fun writeFrame(t: Task, bmp: android.graphics.Bitmap) {
         val dir = dir ?: return
         val name = "t${t.id}_${System.currentTimeMillis() % 1_000_000}.jpg"
         Pictures.write(bmp, File(dir, name), Pictures.Use.TASK)

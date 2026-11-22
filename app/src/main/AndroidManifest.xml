@@ -137,6 +137,14 @@
             </intent-filter>
         </receiver>
 
+        <!-- 1.4.2-beta3: the root-started screen service hands its binder over here (shell / root uids only, checked
+             in the call). Exported because the shell reaches providers only through external access. -->
+        <provider
+            android:name=".host.RootLink"
+            android:authorities="${applicationId}.root"
+            android:exported="true"
+            android:multiprocess="false" />
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

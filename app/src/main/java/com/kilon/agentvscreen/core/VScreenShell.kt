@@ -27,7 +27,7 @@ internal object VScreenShell {
 
     /** Test seam. */
     @Volatile internal var runner: (Array<String>, Long) -> ShizukuManager.ProcessResult =
-        { argv, t -> ShizukuManager.runProcess(argv, null, null, t) }
+        { argv, t -> com.kilon.agentvscreen.host.Privileged.runProcess(argv, null, null, t) }
 
     fun run(argv: Array<String>, timeoutMs: Long = 8_000L) = runner(argv, timeoutMs)
 

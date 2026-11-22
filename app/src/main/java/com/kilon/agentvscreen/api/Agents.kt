@@ -19,6 +19,8 @@ object Agents {
 
     /** How the app names agent [id]. The first token keeps "main" until the user names it. */
     fun name(id: String?): String {
+        // 1.4.2: the user's own turns (ManualScreen) are logged under "user".
+        if (id == com.kilon.agentvscreen.core.ManualScreen.TOKEN) return com.kilon.agentvscreen.tr("你", "You")
         val t = Tokens.list.value.firstOrNull { it.id == (id ?: Tokens.MAIN) }
         return when {
             t == null -> if (id == null || id == Tokens.MAIN) firstName() else id

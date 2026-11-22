@@ -45,12 +45,8 @@ object ExitInfo {
     @Volatile var last: String? = null; private set
 
     fun init(ctx: android.content.Context) {
-        val prev = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            runCatching { AppLogger.error("Crash", "uncaught in ${t.name}: ${e.stackTraceToString().take(4000)}") }
-            prev?.uncaughtException(t, e)
-        }
-        if (android.os.Build.VERSION.SDK_INT < 30) return
+        // 1.4.2: a background thread's exception ends that thread, not the process (see ThreadGuard).
+        com.kilon.agentvscreen.core.ThreadGuard.install({ AppLogger.error("Crash", it) }) { tag, t -> Swallowed.note(tag, t) }
         runCatching {
             val am = ctx.getSystemService(android.app.ActivityManager::class.java) ?: return
             val r = am.getHistoricalProcessExitReasons(ctx.packageName, 0, 1).firstOrNull() ?: return

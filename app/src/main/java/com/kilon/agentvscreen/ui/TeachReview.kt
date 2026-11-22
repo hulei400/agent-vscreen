@@ -46,6 +46,7 @@ import com.kilon.agentvscreen.cmd.Teach
 import com.kilon.agentvscreen.cmd.TeachLine
 import com.kilon.agentvscreen.core.VScreenMap
 import com.kilon.agentvscreen.host.UserAsk
+import com.kilon.agentvscreen.steps
 import com.kilon.agentvscreen.tr
 import org.json.JSONArray
 import org.json.JSONObject
@@ -77,7 +78,7 @@ internal fun ReviewPane(r: Teach.Result, screenGone: Boolean, onLeave: () -> Uni
                 Column(Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(tr("把刚才的操作存成一段", "Save what you just did"), fontSize = 21.sp, fontWeight = FontWeight.Bold)
                     ask?.let { Text(tr("「${it.tokenName}」请你演示：${it.title}", "\"${it.tokenName}\" asked you to show: ${it.title}"), fontSize = 14.sp, color = MaterialTheme.colorScheme.primary) }
-                    Text((r.app ?: tr("没认出应用", "app not recognised")) + " · " + tr("${r.lines.size} 步", "${r.lines.size} steps"),
+                    Text((r.app ?: tr("没认出应用", "app not recognised")) + " · " + steps(r.lines.size),
                         fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     // 1.4.0-beta11: nobody waits for it (no request, or the request ended while recording): say where it goes.
                     if (ask == null) Text(tr("没有 agent 在等这一段，保存后存为你的经验，所有 agent 都能 use。", "No agent is waiting for this; it is saved as your own, and any agent can use it."),

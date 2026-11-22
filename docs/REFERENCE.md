@@ -30,7 +30,7 @@
       字里可写 *（任意字，整段字要对上：*蓝牙* 含蓝牙，共*条 以共开头以条结尾），text:/gone: 条件也一样；字@N = 从上往下第 N 处（@-1 最后一处）；字 +dx,+dy = 字旁边那一点（图标、开关）；坐标可写屏幕比例 50% 80%（换屏幕尺寸也点同一处）
       流程：try 一步 | try { 几步 }（没找到、没达到预期就跳过接着做）| if <条件> [最长] { … } [else { … } | else 一步]（看现在的画面，默认等 1.5s）| repeat 3 { … } | repeat [最多次数] { … } until <条件>（每轮后看，默认最多 10 次）。括号里可以换行、可以嵌套
       键名：back enter tab del space esc search menu up down left right paste copy cut page_up page_down，或数字 keycode（没有 home：副屏没有桌面）
-每个动作后可加 until <条件> [or <条件>] [最长时长，默认 5s]；没写就等画面稳定（最多 3 秒；画面只剩循环小动画也算稳定）。
+每个动作后可加 until <条件> [or <条件>] [最长时长，默认 5s]；没写就等画面稳定（最多 3 秒；画面只剩循环小动画也算稳定）；这次等待结束后（稳定了或到时间）画面和动作前一样时，再看最多 1.5 秒（type、编辑键和 --fast 的中间步骤不看），时刻从动作完成算起：变了就等它稳定，说“画面在动作 X 后才变化，Y 时稳定”（或“等到 Y 还在变”）；其间满足 --stop 条件就停在这一步，后面不做，不给 NO_CHANGE；仍没变才说“画面没有变化”（NO_CHANGE，只表示这段时间里没检测到变化）。
 条件：text:字 | gone:字 | change[:x1,y1,x2,y2] | still[:区域]（完全不动）| stable（稳定，容许循环小动画）| color:x,y=#RRGGBB[~容差] | app:包名或界面名
 一步没达到预期，这段就停在这一步，后面的不做，结果是失败（退出码 1，outcome=missed/refused）：
       until 到时间没等到；字画面上找不到；同样的字有好几处（AMBIGUOUS，会列出每一处的坐标，改用坐标）；#N 的元素已经不在原位（STALE_ELEMENT）；
@@ -154,7 +154,7 @@ in：把用户主屏上的应用移到副屏接着做（返回四段；手机上
 
 ### `schedule ["时间"] | off <名字|all> [--name <名字>] [--for <时长>]`
 
-预约你会来用手机的时间（定时任务用）：每个窗口开始前 3 分钟拉起服务、检查 Shizuku 和连接，没准备好就通知用户，结果作为事件发给本会话。不带参数列出预约和现在是否就绪。
+预约你会来用手机的时间（定时任务用）：每个窗口开始前 3 分钟拉起服务、检查所选的权限来源（Shizuku 或 Root）和连接，没准备好就通知用户，结果作为事件发给本会话。不带参数列出预约和现在是否就绪。
 时间写法："07:00"、"07:00,19:30"、"weekdays 08:30"、"mon,wed,fri 21:00"、"every 2h from 08:00 to 22:00"（间隔至少 30 分钟，最多 8 条）。
 
 - `--name <名字>` 预约的名字（同名会替换；默认 w1、w2…）
@@ -305,8 +305,8 @@ look x1,y1,x2,y2 的旧写法：放大看一块区域（图边上标着副屏坐
 | `BUSY` | `retry_later` | 副屏现在归另一个会话。返回里写了归谁（owner）、多久后自动让出（frees_in_s 秒；null 表示它正在执行命令）。 |
 | `QUEUE_TIMEOUT` | `retry_later` | 前面的命令还没做完，这条排队超过 60 秒，没有执行。 |
 | `CANCELLED` | `none` | 调用方断开了或取消了任务，命令在下一步之前停下。 |
-| `CONNECTION_LOST` | `ask_user` | 后台特权连接断了（Shizuku 停了），副屏和上面的应用已经没了，不是你的操作造成的。告诉用户；恢复后重新 launch。 |
-| `NOT_CONNECTED` | `ask_user` | 副屏服务用不了：Shizuku 停了或没授权，返回里写了是哪一种。把那句转告用户；只是服务关着或收起时不会报这条。 |
+| `CONNECTION_LOST` | `ask_user` | 后台特权连接断了（Shizuku 或 Root 服务停了），副屏和上面的应用已经没了，不是你的操作造成的。告诉用户；恢复后重新 launch。 |
+| `NOT_CONNECTED` | `ask_user` | 副屏服务用不了：Shizuku（或 Root）停了或没授权，返回里写了是哪一种。把那句转告用户；只是服务关着或收起时不会报这条。 |
 | `DISABLED` | `ask_user` | 用户关掉了 Agent-VScreen 的服务。 |
 | `CREATE_FAILED` | `ask_user` | 副屏没建出来。status 里有原因。 |
 | `STALE_SCREEN` | `look` | 这个操作是针对已经重建过的旧副屏的。 |
@@ -323,7 +323,7 @@ look x1,y1,x2,y2 的旧写法：放大看一块区域（图边上标着副屏坐
 | `CLOSE_FAILED` | `look` | 没能只关掉副屏上的任务。 |
 | `MAIN_SCREEN_TASK` | `none` | 这个任务在主屏上，没有动它。 |
 | `SCHEDULE_LIMIT` | `fix_command` | 预约到上限了（8 条）：先 schedule off 一条。 |
-| `NOT_READY` | `ask_user` | Agent-VScreen 没有响应或还没准备好（被系统冻结、服务没开、Shizuku 没运行）。命令行已经试过唤醒一次。把原因告诉用户；定时任务请先用 schedule 预约时间。 |
+| `NOT_READY` | `ask_user` | Agent-VScreen 没有响应或还没准备好（被系统冻结、服务没开、Shizuku / Root 没运行）。命令行已经试过唤醒一次。把原因告诉用户；定时任务请先用 schedule 预约时间。 |
 | `ASK_PENDING` | `ask_user` | 问题已经显示在手机上，用户还没回答。告诉用户去手机上回答；之后把同一个 ask 原样再发一次就能拿到答案（10 分钟内有效）。 |
 | `ASK_DECLINED` | `ask_user` | 用户选择不回答这个问题。不要再问同一个问题，换个方式或告诉用户你停在了哪里。 |
 | `USER_FEEDBACK` | `ask_user` | 用户没有照你问的方式回答，而是说了一句话（在 feedback 里，原话）。多半是你问错了、页面不对或理解偏了：按这句话调整，不要原样再问。 |
@@ -382,7 +382,7 @@ steps:
       words may hold * (any characters; the whole text must match: *Wi-Fi* holds Wi-Fi), in text:/gone: conditions too; words@N = the N-th place from the top (@-1 the last); words +dx,+dy = the point that far beside them (an icon, a switch); coordinates may be shares of the screen, 50% 80% (same place on any screen size)
       flow: try <step> | try { steps } (not found or not as expected: skip and go on) | if <condition> [max] { … } [else { … } | else <step>] (the screen as it is, waits up to 1.5 s by default) | repeat 3 { … } | repeat [at most] { … } until <condition> (checked after each round, at most 10 by default). Braces may span lines and nest
       keys: back enter tab del space esc search menu up down left right paste copy cut page_up page_down, or a numeric keycode (no home: the screen has no launcher)
-After each action you may add until <condition> [or <condition>] [max duration, default 5s]; without it the picture is awaited to settle (up to 3 s; a picture left with only a small looping animation counts as settled).
+After each action you may add until <condition> [or <condition>] [max duration, default 5s]; without it the picture is awaited to settle (up to 3 s; a picture left with only a small looping animation counts as settled); if after that wait (settled or timed out) it matches the picture before the action, it looks up to 1.5 s longer (not for type, edit keys or the in-between steps of --fast), timing from when the action finished: a change then is waited out and said as "the screen changed late, X after the action, and settled at Y" (or "was still changing when time was up at Y"); a --stop condition met meanwhile stops the stretch there, skips the rest and gives no NO_CHANGE; only a picture still unchanged is "the screen did not change" (NO_CHANGE: no change was seen in that time).
 conditions: text:<word> | gone:<word> | change[:x1,y1,x2,y2] | still[:region] (no motion at all) | stable (settled, small looping animation allowed) | color:x,y=#RRGGBB[~tolerance] | app:<package or screen name>
 A step that does not reach what it expects stops the stretch there, skips the rest, and the result is a failure (exit code 1, outcome=missed/refused):
       until timed out; text not found on the screen; the same text in several places (AMBIGUOUS, every place is listed with its point: use coordinates); the element of #N is no longer where it was (STALE_ELEMENT);
@@ -506,7 +506,7 @@ scope: `operate`
 
 ### `schedule ["when"] | off <name|all> [--name <name>] [--for <duration>]`
 
-book the times you will use the phone (for timed tasks): 3 minutes before each window the service is started and Shizuku and the connection are checked; the user is notified if it is not ready, and the result is sent to this session as an event. With no argument: the schedules and whether it is ready now.
+book the times you will use the phone (for timed tasks): 3 minutes before each window the service is started, and the selected permission source (Shizuku or root) and the connection are checked; the user is notified if it is not ready, and the result is sent to this session as an event. With no argument: the schedules and whether it is ready now.
 Times: "07:00", "07:00,19:30", "weekdays 08:30", "mon,wed,fri 21:00", "every 2h from 08:00 to 22:00" (at least 30 minutes apart, at most 8 entries).
 
 - `--name <name>` the schedule's name (the same name replaces it; default w1, w2…)
@@ -641,8 +641,8 @@ scope: `look`
 | `BUSY` | `retry_later` | The screen belongs to another session now. The reply says whose (owner) and when it frees up by itself (frees_in_s seconds; null while it is running a command). |
 | `QUEUE_TIMEOUT` | `retry_later` | Earlier commands are still running; this one waited in the queue for over 60 s and did not run. |
 | `CANCELLED` | `none` | The caller disconnected or cancelled the task; the command stopped before its next step. |
-| `CONNECTION_LOST` | `ask_user` | The privileged background connection broke (Shizuku stopped); the screen and its app are gone, not because of your actions. Tell the user; launch again once it is back. |
-| `NOT_CONNECTED` | `ask_user` | The screen service cannot be used: Shizuku stopped or is not granted; the reply says which. Pass that line on to the user. A service that is merely off or hidden never reports this. |
+| `CONNECTION_LOST` | `ask_user` | The privileged background connection broke (Shizuku or the root service stopped); the screen and its app are gone, not because of your actions. Tell the user; launch again once it is back. |
+| `NOT_CONNECTED` | `ask_user` | The screen service cannot be used: Shizuku (or root) stopped or is not granted; the reply says which. Pass that line on to the user. A service that is merely off or hidden never reports this. |
 | `DISABLED` | `ask_user` | The user turned the Agent-VScreen service off. |
 | `CREATE_FAILED` | `ask_user` | The screen could not be created. status says why. |
 | `STALE_SCREEN` | `look` | This action was meant for an older screen that has been rebuilt. |
@@ -659,7 +659,7 @@ scope: `look`
 | `CLOSE_FAILED` | `look` | Could not close just the task on the screen. |
 | `MAIN_SCREEN_TASK` | `none` | This task is on the main screen; it was left alone. |
 | `SCHEDULE_LIMIT` | `fix_command` | Too many schedules (8): remove one with schedule off. |
-| `NOT_READY` | `ask_user` | Agent-VScreen did not answer or is not ready (frozen by the system, service off, Shizuku not running). The CLI already tried to wake it once. Tell the user why; for timed tasks, book the time with schedule first. |
+| `NOT_READY` | `ask_user` | Agent-VScreen did not answer or is not ready (frozen by the system, service off, Shizuku / root not running). The CLI already tried to wake it once. Tell the user why; for timed tasks, book the time with schedule first. |
 | `ASK_PENDING` | `ask_user` | The question is on the phone and the user has not answered yet. Tell the user to answer on the phone; then send the same ask again to get the answer (valid for 10 minutes). |
 | `ASK_DECLINED` | `ask_user` | The user chose not to answer. Don't ask the same again; go another way or tell the user where you stopped. |
 | `USER_FEEDBACK` | `ask_user` | The user did not answer the way you asked but said something instead (in feedback, verbatim). Most likely the question, the page or your reading was off: adjust to it; don't ask the same again. |

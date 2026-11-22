@@ -152,8 +152,8 @@ class MainActivity : ComponentActivity(), AppHost {
         if (Prefs.serviceOn(this)) HostService.start(this)
         com.kilon.agentvscreen.host.Updates.checkDaily(this)
         Overlay.refresh()
-        // Shizuku's answer can change while we are away: read it again.
-        ShizukuManager.refresh()
+        // Shizuku's (or root's) answer can change while we are away: read it again.
+        com.kilon.agentvscreen.host.Privileged.refresh()
     }
 
     override fun say(text: String) { Toast.makeText(this, text, Toast.LENGTH_SHORT).show() }
@@ -170,11 +170,22 @@ class MainActivity : ComponentActivity(), AppHost {
             ShizukuBackend.Ask.ALREADY -> say(tr("Shizuku 已授权", "Shizuku is authorized"))
             ShizukuBackend.Ask.NO_BINDER -> { ShizukuManager.openShizukuApp(this); say(tr("Shizuku 没在运行：先在 Shizuku 里启动它", "Shizuku is not running: start it in Shizuku first")) }
             ShizukuBackend.Ask.DENIED_ON_RECORD, ShizukuBackend.Ask.FAILED -> inManager()
-            // A dialog should show; if no answer comes within 8 s, the request went nowhere.
-            ShizukuBackend.Ask.ASKED -> window.decorView.postDelayed({
-                ShizukuManager.refresh()
-                if (ShizukuManager.snapshot.value.state == ShizukuManager.State.NEED_PERMISSION && !isFinishing && hasWindowFocus()) inManager()
-            }, 8_000L)
+            // A dialog should show. A denial (the user's Deny or Shizuku's "adb permission limited") gets both
+            // readings; no answer within 8 s means the request went nowhere. Checks belong to this request only.
+            ShizukuBackend.Ask.ASKED -> {
+                val attempt = ShizukuManager.attempt()
+                var told = false
+                fun check(last: Boolean) {
+                    if (told || isFinishing || ShizukuManager.attempt() != attempt) return
+                    ShizukuManager.refresh()
+                    val s = ShizukuManager.snapshot.value
+                    if (s.state != ShizukuManager.State.NEED_PERMISSION) return
+                    if (s.denied) { told = true; say(ShizukuManager.deniedHint()) }
+                    else if (last && hasWindowFocus()) inManager()
+                }
+                window.decorView.postDelayed({ check(last = false) }, 3_000L)
+                window.decorView.postDelayed({ check(last = true) }, 8_000L)
+            }
         }
     }
 

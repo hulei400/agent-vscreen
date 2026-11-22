@@ -52,6 +52,8 @@ internal class Probe(private val h: VScreenOffloadHandler, private val d: VScree
         /** A settle wait after an action that changed nothing gives up waiting for a change after this long. */
         const val GRACE_MS = 1_000L
         const val CALM_MS = 1_500L
+        /** After a settle wait that saw no reaction, how much longer to look for a late one before saying "no change". */
+        const val LATE_MS = 1_500L
     }
     private val since = SystemClock.elapsedRealtime()
     /** Areas already playing before (video, carousel): not waited for, not read. */
@@ -315,6 +317,52 @@ internal fun waitOn(d: VScreenDisplay, probe: Probe?, maxMs: Long, stop: Probe?,
     }
 }
 
+/** What ends every wait at once: the caller went away, the screen is gone, the user took over or stopped. */
+internal fun checkInterrupts(d: VScreenDisplay, call: Call?) {
+    if (call?.cancelled == true) throw ActionError("CANCELLED", tr("调用方断开或取消了，这段停在这里", "The caller disconnected or cancelled; the stretch stops here"))
+    connectionLost(d)?.let { throw ActionError("CONNECTION_LOST", it) }
+    if (BackgroundOperation.state.value.takeoverSessionId != null) throw ActionError("USER_TAKEOVER", tr("用户接管了副屏，这段停在这里", "The user took over the screen; the stretch stops here"))
+    if (BackgroundOperation.state.value.userStopped) throw ActionError("USER_STOPPED", BackgroundOperation.userStoppedMessage())
+}
+
+/**
+ * How the look for a late reaction ended; times are ms after the action finished, on the one clock lookLate was given.
+ * [same]: the last picture still equals the one before the action (null = no picture). [changedMs]: when the first
+ * different picture was seen. [stopped]: a stop condition's fact, seen while looking or while the late change settled.
+ * [settle]: the wait for the late change to settle. [endMs]: when the look ended (the whole wait).
+ */
+internal class LateOut(val same: Boolean?, val changedMs: Long?, val stopped: String?, val settle: WaitOut?, val endMs: Long) {
+    /** The wait's words when a stop condition fired or the screen changed late (else null). */
+    fun waitText(): String? = endMs.let { waitedMs -> when {
+        stopped != null -> tr("${s1(waitedMs)} 时停止条件 $stopped", "stop condition $stopped at ${s1(waitedMs)}")
+        changedMs == null -> null
+        settle?.met != null -> tr("画面在动作 ${s1(changedMs)} 后才变化，${s1(waitedMs)} 时稳定", "the screen changed late, ${s1(changedMs)} after the action, and settled at ${s1(waitedMs)}")
+        else -> tr("画面在动作 ${s1(changedMs)} 后才变化，等到 ${s1(waitedMs)} 还在变", "the screen changed late, ${s1(changedMs)} after the action, and was still changing when time was up at ${s1(waitedMs)}")
+    } }
+}
+
+/**
+ * 1.4.2 (E2E on a slow emulator: `tap Battery` opened Battery about 2 s later, but the reply said "the screen did not
+ * change"): after a settle wait that saw no reaction, look up to [windowMs] longer. [nextSame] waits for the next
+ * picture and says whether it still equals the one before the action; [stop] is checked on every picture, as in any
+ * wait; a late change is timed when first seen and then waited out with [settle]. [sinceDone]: ms since the action
+ * finished, the same clock the step's first wait is timed on, so every time in the reply counts from one moment.
+ */
+internal fun lookLate(windowMs: Long, sinceDone: () -> Long, nextSame: () -> Boolean?, stop: () -> String?, settle: () -> WaitOut): LateOut {
+    val t0 = sinceDone()
+    var same: Boolean? = true
+    while (same == true && sinceDone() - t0 < windowMs) {
+        same = nextSame()
+        val seenAt = sinceDone()
+        stop()?.let { return LateOut(same, seenAt.takeIf { same == false }, it, null, seenAt) }
+        if (same == false) {
+            val s = settle()
+            return LateOut(false, seenAt, s.stopped, s, sinceDone())
+        }
+    }
+    return LateOut(same, null, null, null, sinceDone())
+}
+
 /**
  * Options of one stretch. [fast]: no settling wait between actions (the last step still waits). [bare]: the app's
  * before / after steps are skipped.
@@ -434,8 +482,8 @@ internal fun VScreenOffloadHandler.runSegment(sid: String, d: VScreenDisplay, st
             if (missing.isNotEmpty()) throw StepRefused("INVALID_STEP", tr("段“$name”要填 ${missing.max()} 个参数（缺 ${missing.joinToString(" ") { "{$it}" }}）：use $name ${(1..missing.max()).joinToString(" ") { "<$it>" }}，有空格的用引号",
                 "Segment \"$name\" takes ${missing.max()} values (missing ${missing.joinToString(" ") { "{$it}" }}): use $name ${(1..missing.max()).joinToString(" ") { "<$it>" }}; quote values with spaces"))
             val inner = runCatching { filled.map { Steps.parse(it.first) } }.getOrElse { throw StepRefused("INVALID_STEP", tr("段“$name”的步骤读不懂：${it.message}", "The steps of segment \"$name\" can't be parsed: ${it.message}")) }
-            put(StepOut(label, step.raw, "done", tr("$label use $name（${inner.size} 步）", "$label use $name (${inner.size} steps)")))
-            if (fromN > inner.size) throw StepRefused("INVALID_STEP", tr("段“$name”只有 ${inner.size} 步，没有第 $fromN 步", "Segment \"$name\" has only ${inner.size} steps, there is no step $fromN"))
+            put(StepOut(label, step.raw, "done", tr("$label use $name（${inner.size} 步）", "$label use $name (${com.kilon.agentvscreen.steps(inner.size)})")))
+            if (fromN > inner.size) throw StepRefused("INVALID_STEP", tr("段“$name”只有 ${inner.size} 步，没有第 $fromN 步", "Segment \"$name\" has only ${com.kilon.agentvscreen.steps(inner.size)}, there is no step $fromN"))
             app?.let { VScreenMap.markUsed(it, name) }
             val at = UseAt(name, params, inner.size)
             useStack += at
@@ -471,7 +519,7 @@ internal fun VScreenOffloadHandler.runSegment(sid: String, d: VScreenDisplay, st
         if (step.kind == StepKind.TRY) {
             // Not found, not as expected, more than one place: skip what is inside and go on. Being interrupted is not skipped.
             val missed0 = missed; val skipped0 = skipped; val from = outs.size
-            put(StepOut(label, step.raw, "done", tr("$label try（${step.body.size} 步，没做成就跳过）", "$label try (${step.body.size} steps, skipped if they don't work)")))
+            put(StepOut(label, step.raw, "done", tr("$label try（${step.body.size} 步，没做成就跳过）", "$label try (${com.kilon.agentvscreen.steps(step.body.size)}, skipped if they don't work)")))
             var why: String? = null
             try { step.body.forEachIndexed { i, st -> runOne(st, "$label.${i + 1}", depth, quick, own) } }
             catch (e: StepRefused) { if (e.code in INTERRUPTS) throw e; why = "${e.code}：${e.message}" }
@@ -563,9 +611,10 @@ internal fun VScreenOffloadHandler.runSegment(sid: String, d: VScreenDisplay, st
                 put(so); return
             }
             if (probe == null) { so.text = "$label ${step.raw} → $fact"; put(so); Thread.sleep(80); return }
+            val tWait = SystemClock.elapsedRealtime()
             val w = waitOn(d, probe, maxMs, stop)
             so.waitedFor = conds.joinToString(" or ") { it.raw }; so.waitMs = w.ms; so.waitMet = w.met != null
-            val waitTxt = when {
+            var waitTxt = when {
                 w.stopped != null -> { stoppedBy = w.stopped; stoppedAt = label; so.status = "stopped"; tr("${s1(w.ms)} 时停止条件 ${w.stopped}", "stop condition ${w.stopped} at ${s1(w.ms)}") }
                 w.met != null -> tr("等到 ${w.met}（${s1(w.ms)}）", "got ${w.met} (${s1(w.ms)})")
                 step.until == null -> tr("等画面稳定：${s1(w.ms)} 到时间，画面还在变", "waiting for the screen to settle: time up at ${s1(w.ms)}, still changing")
@@ -577,11 +626,27 @@ internal fun VScreenOffloadHandler.runSegment(sid: String, d: VScreenDisplay, st
                 }
             }
             // 1.2: an action after which not one sampled pixel differs is said: the usual cause is a tap that hit nothing.
-            if (before != null && so.status == "done") d.latestFrame()?.let { VScreenPerception.small(it) }?.let { after ->
-                val same = Change.same(before, after, Change.Level.TINY, skip = VScreenPerception.mask(d.displayId)?.rectsIn(after.width, after.height).orEmpty())
-                after.recycle()
-                so.changed = !same
-                if (same) notes.add("NO_CHANGE", tr("第 $label 步（${step.raw}）之后画面没有任何变化：可能没点中、控件没响应，或变化不在画面上。看图核对这一步有没有生效", "After step $label (${step.raw}) nothing on the screen changed: it may have missed, the control may not respond, or the effect is not visible. Check the picture to see whether the step took effect"))
+            if (before != null && so.status == "done") {
+                val mask = VScreenPerception.mask(d.displayId)
+                fun sameAsBefore(): Boolean? = d.latestFrame()?.let { VScreenPerception.small(it) }?.let { after ->
+                    try { Change.same(before, after, Change.Level.TINY, skip = mask?.rectsIn(after.width, after.height).orEmpty()) } finally { after.recycle() }
+                }
+                var same = sameAsBefore()
+                // The settle wait stops waiting for a reaction after GRACE_MS, and a slow app reacts later: look a little
+                // longer before saying nothing changed. A stop condition met meanwhile stops the stretch as in any wait.
+                if (same == true) {
+                    val call = Call.current()
+                    var seen = d.version
+                    val late = lookLate(Probe.LATE_MS, { SystemClock.elapsedRealtime() - tWait },
+                        nextSame = { d.awaitNewFrame(seen, 100); seen = d.version; checkInterrupts(d, call); sameAsBefore() },
+                        stop = { stop?.poll() },
+                        settle = { val p = Probe(this, d, listOf(Cond("stable", CondKind.STABLE))); try { waitOn(d, p, 3_000L, stop) } finally { p.close() } })
+                    same = late.same
+                    late.waitText()?.let { waitTxt = it; so.waitMs = late.endMs; so.waitMet = late.stopped == null && late.settle?.met != null }
+                    late.stopped?.let { stoppedBy = it; stoppedAt = label; so.status = "stopped" }
+                }
+                if (same != null) so.changed = !same
+                if (same == true && so.status == "done") notes.add("NO_CHANGE", tr("第 $label 步（${step.raw}）之后画面没有任何变化：可能没点中、控件没响应，或变化不在画面上。看图核对这一步有没有生效", "After step $label (${step.raw}) nothing on the screen changed: it may have missed, the control may not respond, or the effect is not visible. Check the picture to see whether the step took effect"))
             }
             so.text = tr("$label ${step.raw} → $fact；$waitTxt", "$label ${step.raw} → $fact; $waitTxt") + if (so.changed == false) tr("；画面没有变化", "; the screen did not change") else ""
             put(so)
@@ -881,7 +946,7 @@ internal fun connectionLost(d: VScreenDisplay): String? {
     val st = BackgroundOperation.state.value
     if (!d.released && st.connection == BackgroundOperation.Connection.READY) return null
     return tr("后台连接断了（${st.connectionError ?: st.connection.name}），副屏和上面的应用已经没了，不是你的操作造成的。", "The background connection broke (${st.connectionError ?: st.connection.name}); the screen and the app on it are gone, and your actions did not cause it. ") +
-        tr("告诉用户；Shizuku 恢复运行后重新 launch", "Tell the user; once Shizuku runs again, launch again")
+        tr("告诉用户；Shizuku / Root 恢复运行后重新 launch", "Tell the user; once Shizuku / root runs again, launch again")
 }
 
 /** What one action did ([text]), and [miss] when its own effect could not be confirmed (it ends the stretch; [code] says which kind). */

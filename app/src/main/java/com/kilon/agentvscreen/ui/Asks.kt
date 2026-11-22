@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kilon.agentvscreen.host.UserAsk
+import com.kilon.agentvscreen.steps
 import com.kilon.agentvscreen.tr
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -206,7 +207,7 @@ internal fun OptionRow(i: Int, text: String, selected: Boolean = false, onClick:
  * this card brings the review page back, or discards it (the agent then hears "not shown").
  */
 internal object ReviewWords {
-    fun title(r: com.kilon.agentvscreen.cmd.Teach.Result) = tr("录好了 ${r.lines.size} 步，等你保存", "${r.lines.size} steps recorded, waiting to be saved")
+    fun title(r: com.kilon.agentvscreen.cmd.Teach.Result) = tr("录好了 ${r.lines.size} 步，等你保存", "${steps(r.lines.size)} recorded, waiting to be saved")
     fun who(r: com.kilon.agentvscreen.cmd.Teach.Result) = r.ask?.let { tr("「${it.tokenName}」请你演示：${it.title}", "\"${it.tokenName}\" asked: ${it.title}") }
         ?: tr("你自己录的示教", "A lesson of your own")
     fun open(ctx: Context) = Surface.openReview(ctx)

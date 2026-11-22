@@ -78,9 +78,8 @@ object Readiness {
             // was reported as "down … fix not_connected", and agents asked users to repair a service that was only off.
             "READY" -> if (i.connection == "ERROR")
                 add(Item("not_connected", false, tr("副屏服务刚才没有响应，下一条命令会自动重连，不用用户做什么", "The screen service did not answer just now; the next command reconnects by itself, nothing for the user to do")))
-            "NOT_RUNNING" -> add(Item("no_privilege", true, tr("Shizuku 没在运行（手机重启后要用户重新启动 Shizuku）", "Shizuku is not running (after a phone restart the user must start Shizuku again)")))
-            "NOT_INSTALLED" -> add(Item("no_privilege", true, tr("没装 Shizuku", "Shizuku is not installed")))
-            else -> add(Item("no_privilege", true, tr("Agent-VScreen 没有 Shizuku 授权", "Agent-VScreen has no Shizuku permission")))
+            // 1.4.2-beta3: Shizuku or root, whichever the user chose, says why in its own words.
+            else -> add(Item("no_privilege", true, Privileged.notReadyHint()))
         }
         if (i.userStopped) add(Item("user_stopped", true, tr("用户按了“停止 AI”，只有用户能解除", "The user pressed \"Stop AI\"; only the user can lift it")))
         if (i.serviceOn && i.serviceAlive && !i.foreground)

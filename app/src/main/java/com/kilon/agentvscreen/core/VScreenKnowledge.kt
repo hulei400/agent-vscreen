@@ -60,15 +60,9 @@ object VScreenKnowledge {
      * the package (settings, calculator), name contains, package contains. Launchable apps first.
      */
     fun findApps(query: String?): List<Pair<String, String>> {
-        val c = ctx() ?: return emptyList()
-        val pm = c.packageManager
-        val launcher = runCatching {
-            pm.queryIntentActivities(android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_LAUNCHER), 0)
-                .map { it.loadLabel(pm).toString().trim() to it.activityInfo.packageName }
-        }.getOrDefault(emptyList())
+        // 1.4.2: from the catalog read once (AppCatalog), not the package manager on every call.
+        val (launcher, appLabels) = AppCatalog.pairs()
         val q = query?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return launcher.distinctBy { it.second }
-        // Application labels too (a launcher entry may be named differently: Honor's clock "时钟" vs "时钟服务").
-        val appLabels = runCatching { pm.getInstalledApplications(0).mapNotNull { ai -> runCatching { pm.getApplicationLabel(ai).toString().trim() to ai.packageName }.getOrNull() } }.getOrDefault(emptyList())
         val launchable = launcher.map { it.second }.toSet()
         fun rank(p: Pair<String, String>): Int {
             val name = p.first.lowercase(); val pkg = p.second.lowercase()

@@ -87,8 +87,8 @@ class HostService : Service() {
         private fun startFromShell(app: Context) {
             Thread({
                 val until = android.os.SystemClock.elapsedRealtime() + 60_000L
-                while (!ShizukuManager.isReady() && android.os.SystemClock.elapsedRealtime() < until) Thread.sleep(1_000)
-                if (!ShizukuManager.isReady() || isAlive) return@Thread
+                while (!Privileged.isReady() && android.os.SystemClock.elapsedRealtime() < until) Thread.sleep(1_000)
+                if (!Privileged.isReady() || isAlive) return@Thread
                 val r = runCatching {
                     com.kilon.agentvscreen.core.VScreenShell.run(arrayOf("am", "start-foreground-service", "-n", "${app.packageName}/${HostService::class.java.name}"), 6_000L)
                 }.getOrNull()

@@ -57,3 +57,6 @@ object I18n {
 
 /** Pick the text for the current language. */
 fun tr(zh: String, en: String): String = if (I18n.en) en else zh
+
+/** "3 步" / "3 steps", "1 step". */
+fun steps(n: Int): String = tr("$n 步", if (n == 1) "1 step" else "$n steps")

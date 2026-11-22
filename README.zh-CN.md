@@ -3,7 +3,7 @@
 # Agent-VScreen
 
 <p align="center">
-  <a href="https://github.com/kilolonion/agent-vscreen/releases/latest"><img src="https://img.shields.io/github/v/release/kilolonion/agent-vscreen" alt="release"></a>
+  <a href="https://github.com/kilolonion/agent-vscreen/releases/latest"><img src="https://img.shields.io/github/v/release/kilolonion/agent-vscreen" alt="最新正式版"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/kilolonion/agent-vscreen" alt="license"></a>
   <img src="https://img.shields.io/badge/Android-11%2B-3DDC84?logo=android&logoColor=white" alt="Android 11+">
   <img src="https://img.shields.io/badge/root-not%20required-blue" alt="no root">
@@ -18,19 +18,26 @@ Agent-VScreen 在一块看不见的虚拟屏上打开和操作别的应用，你
 
 手机上的任何 agent 都可以调用它：带终端的 agent 用命令行 `vscreen`，支持 MCP 的用 MCP，自己写代码的用 HTTP。
 
-<p align="center"><img src="docs/demo.gif" width="440" alt="agent 在后台副屏里解数独和玩洛克王国，右上角悬浮窗实时显示副屏"></p>
-<p align="center"><sub>左：agent 在后台副屏里打开 Chrome 解数独（8 倍速）。右：agent 在后台副屏里玩洛克王国，完成横屏启动、摇杆长按走动、拖动镜头和战斗弹窗操作（2.6 倍速）。两边用户的主屏都仍是聊天界面。</sub></p>
+<p align="center"><img src="docs/app.png" width="760" alt="Agent-VScreen 现在、接入、记录和设置页面"></p>
+<p align="center"><sub>App 界面：现在（agent 正在副屏上做什么、接管或停止、最近的任务）、接入（已接入的 agent、远程连接、令牌）、记录（每次任务、提问和预约，带步骤缩略图）、设置（谁能连进来、agent 能做多少、应用规则、悬浮窗）。</sub></p>
 
 <p align="center"><img src="docs/agents.png" width="860" alt="Minis、Eta、RikkaHub、Muse 四个安卓 agent 都通过 vscreen 在副屏打开 Linux.do 客户端"></p>
 <p align="center"><sub>同一条安装命令，Minis、Eta、RikkaHub、Muse 四个不同的安卓 agent 都能接入并操作副屏。</sub></p>
 
-<p align="center"><img src="docs/app.png" width="760" alt="Agent-VScreen 接入、记录、经验和设置页面"></p>
-<p align="center"><sub>App 界面：接入（每个接入的 agent 和远程连接）、记录（每次任务的步骤和画面）、经验（你示教的和 agent 记下的）、设置（谁能连进来、agent 能做多少、副屏）。</sub></p>
+<p align="center"><img src="docs/demo.gif" width="760" alt="用户在主屏滑动网页的同时，agent 在后台副屏里打开时钟并启动一个 10 分钟定时器，悬浮窗实时显示副屏"></p>
+<p align="center"><sub>后台操作：你在 Chrome 里照常看网页，agent 在后台副屏里打开时钟、设好 10 分钟定时器并启动。终端里是真实发出的 <code>vscreen</code> 命令（等待的部分 6 倍速）。<a href="docs/promo/background.mp4?raw=true">下载 MP4</a></sub></p>
 
-- 版本：1.4.0（versionCode 49）
+<p align="center"><img src="docs/takeover.gif" width="760" alt="用户长按悬浮窗接管副屏，自己滑动和点按，再交还给 agent 继续"></p>
+<p align="center"><sub>随时接管：长按悬浮窗就能自己操作副屏，用完交还，agent 重新读屏后接着做。<a href="docs/promo/takeover.mp4?raw=true">下载 MP4</a></sub></p>
+
+<p align="center"><img src="docs/tour.gif" width="760" alt="依次浏览 App 的现在、接入、记录和设置四个页面"></p>
+<p align="center"><sub>agent 工作时的 App 界面一览。<a href="docs/promo/tour.mp4?raw=true">下载 MP4</a></sub></p>
+<p align="center"><sub>三段 MP4 都带配乐，另有一段 34 秒的<a href="docs/promo/mix.mp4?raw=true">混剪版</a>。配乐：“Wallpaper”，Kevin MacLeod（incompetech.com），<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>。</sub></p>
+
+- 版本：1.4.2-fork（versionCode 22）· [下载 APK](https://github.com/hulei400/agent-vscreen/releases/latest)
 - 包名：`com.kilon.agentvscreen`
 - 系统：Android 11 及以上（arm64），推荐 Android 14 及以上
-- 特权：只用 [Shizuku](https://shizuku.rikka.app/)，不需要 root
+- 特权：默认用 [Shizuku](https://shizuku.rikka.app/)，不需要 root；已 root 的手机也可以直接用 Root
 
 ## 它能做什么
 
@@ -39,7 +46,7 @@ Agent-VScreen 在一块看不见的虚拟屏上打开和操作别的应用，你
 - **能等、能盯**：动作后可以等某段字出现、消失或画面稳定；也能在这一轮结束后继续盯着，条件出现就通知你或叫醒 agent。
 - **和你配合**：agent 可以请你在画面上指出一样东西（`ask`），或请你亲手做一遍存成示教（`teach`）；要密码、验证码的步骤交到你的主屏上做。
 - **悬浮窗**：边框颜色表示现在谁在用副屏（彩虹色 AI 在操作、蓝色待命、绿色你接管、红色已叫停）；拖动移动、双指缩放、甩到边上折成小标签；按住画面 0.5 秒接管；也能打开全屏页，用手机自己的输入法打字。
-- **不和 agent 抢权限**：只用 Shizuku，不占用 adb，不改无线调试；你的 agent 自己用的 adb 或 Shizuku 照常可用。
+- **不和 agent 抢权限**：App 不占用 adb，不改无线调试；你的 agent 自己用的 adb 或 Shizuku 照常可用。
 
 ## agent 能用它做什么
 
@@ -69,9 +76,28 @@ Agent-VScreen 在一块看不见的虚拟屏上打开和操作别的应用，你
 
 ## 安装
 
+<p align="center"><a href="docs/promo/tutorial.zh.mp4?raw=true"><img src="docs/tutorial.zh.png" width="760" alt="新手教学视频：授权、接入 agent、交给它第一件事、随时接管、回看记录"></a></p>
+<p align="center"><sub>新手教学视频（中文界面和配音，约 2 分钟）：从授权到让 agent 做第一件事。<a href="docs/promo/tutorial.zh.mp4?raw=true">下载 MP4</a></sub></p>
+
 1. 安装 APK，打开 Agent-VScreen。
-2. 确认 Shizuku 已经启动，点 **授权 Shizuku**。
+2. 在 **首次配置** 里选一种权限来源：
+   - **Shizuku（默认）**：先启动 Shizuku，再点 **授权 Shizuku**。手机每次重启后要重新启动 Shizuku。
+   - **Root**：手机已 root 时，点 **手机已 root？改用 Root**，在 root 管理器弹窗里授权，无需安装 Shizuku。以后可以在 **设置 › 权限来源** 切换；切换会关闭当前副屏。
 3. 点 **一键配置其余项**：悬浮窗、通知、只读无障碍、电池优化和后台运行。荣耀、华为、小米、OPPO、vivo 等手机再点 **去设置后台管理**，允许自启动、关联启动和后台活动，否则系统可能把它冻结在后台。
+
+### 验证下载的 APK
+
+安装前，用 Android SDK Build Tools 自带的 [`apksigner`](https://developer.android.com/tools/apksigner) 验证。把 `downloaded.apk` 换成下载的 APK 路径：
+
+```sh
+apksigner verify --print-certs downloaded.apk
+```
+
+验证必须成功，且签名证书的 SHA-256 指纹必须与官方发布证书（`CN=Agent-VScreen`）一致：
+
+`56:B1:48:24:54:9E:69:80:17:EB:A9:07:CB:C3:34:7E:E3:A4:BA:30:90:7E:FB:D6:06:8E:A5:1F:F4:49:57:56`
+
+`apksigner` 输出的指纹是小写且不带冒号。应核对证书指纹，不要只看证书名称，也不要拿 APK 文件本身的 SHA-256 校验值来比。验证失败或指纹不符时，请勿安装。
 
 ## 接入 agent
 
@@ -97,7 +123,7 @@ Agent-VScreen 在一块看不见的虚拟屏上打开和操作别的应用，你
 - **Tailscale App**：手机上已经装了 Tailscale App、或要靠出口节点上网时用它。内置节点只负责让别的设备连进来，不接管手机自己的上网。
 - 也可以用 SSH 端口转发。
 
-令牌等于这台手机的操作权限：连其它设备时请求带签名，令牌本身不在网络上传；本应用不提供公网链接。不要把令牌贴进公开的配置或截图。
+令牌等于这台手机的操作权限：内置 Tailscale 在加密连接上接受令牌，其它远程连接默认要求给请求签名。本应用不提供公网链接。不要把令牌贴进公开的配置或截图。
 
 ## 文档
 
@@ -105,6 +131,13 @@ Agent-VScreen 在一块看不见的虚拟屏上打开和操作别的应用，你
 - [docs/REFERENCE.md](docs/REFERENCE.md)：每条命令的参数和每个结果代码（由代码生成）。
 - [docs/TASKS.md](docs/TASKS.md)：发版前在真机上跑的固定任务集。
 - [docs/CHANGELOG.zh-CN.md](docs/CHANGELOG.zh-CN.md)：更早版本的更新内容。
+
+## 1.4.2-beta3 更新内容
+
+- **可直接用 Root**：已 root 的手机可以不装 Shizuku。默认仍用 Shizuku，不需要 root。
+- **自己在副屏打开应用**：从首页打开，不必通过 agent。你使用副屏时，agent 会收到 `BUSY`；首页会显示你离开时的画面。
+- **更新渠道**：在设置里选择 **正式版** 或 **测试版（含正式版）**，更新说明支持 Markdown。
+- **更少卡死**：后台线程出错不会让整个进程退出，副屏服务和文字识别有超时，应用列表会缓存。
 
 ## 1.4.0 更新内容
 

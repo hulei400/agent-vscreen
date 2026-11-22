@@ -1,6 +1,7 @@
 package com.kilon.agentvscreen.ui
 
 import androidx.compose.foundation.layout.offset
+import com.kilon.agentvscreen.steps
 import com.kilon.agentvscreen.tr
 
 import android.os.Bundle
@@ -260,7 +261,7 @@ class FullscreenActivity : PageActivity() {
         LaunchedEffect(req?.id, recording, prepId, sayNow.value) {
             val r = req ?: return@LaunchedEffect
             if (sayNow.value) return@LaunchedEffect
-            delay((2_500L + (r.title.length + r.detail.length) * 80L).coerceIn(4_000L, 12_000L))
+            delay((2_500L + (r.title.length + r.detail.length) * 80L).clampIn(4_000L, 12_000L))
             if (!sayNow.value) BriefPlace.ball = true
         }
         val mark = remember { MarkState() }
@@ -276,7 +277,7 @@ class FullscreenActivity : PageActivity() {
             val a = mark.a ?: return null
             val w = picSize.width.toFloat(); val h = picSize.height.toFloat()
             if (w <= 0f || h <= 0f) return null
-            fun scr(o: Offset) = pictureToScreen(o.x.coerceIn(0f, w - 1), o.y.coerceIn(0f, h - 1), android.graphics.RectF(0f, 0f, w, h))
+            fun scr(o: Offset) = pictureToScreen(o.x.clampIn(0f, w - 1), o.y.clampIn(0f, h - 1), android.graphics.RectF(0f, 0f, w, h))
             return when (req?.kind) {
                 UserAsk.Kind.POINT -> scr(a)?.let { (x, y) -> org.json.JSONObject().put("kind", "point").put("x", x).put("y", y) }
                 UserAsk.Kind.AREA -> { val b = mark.b ?: return null; if (kotlin.math.hypot(a.x - b.x, a.y - b.y) < 12f) return null
@@ -348,7 +349,7 @@ class FullscreenActivity : PageActivity() {
                                     val ev = withTimeoutOrNull(16L) { awaitPointerEvent() }
                                     val elapsed = SystemClock.uptimeMillis() - t0
                                     if (!takenOver && !moved && !held) {
-                                        hold = ((elapsed - 100L) / 400f).coerceIn(0f, 1f); holdAt = down.position
+                                        hold = ((elapsed - 100L) / 400f).clampIn(0f, 1f); holdAt = down.position
                                         if (hold >= 1f) {
                                             held = true; hold = 0f
                                             if (s.userStopped) BackgroundOperation.userResume()
@@ -583,7 +584,7 @@ private fun FullscreenTerminalView(entries: List<VScreenTerminal.Entry>) {
 
     private fun androidx.compose.ui.input.pointer.PointerInputScope.map(p: Offset, w: Float, h: Float): Pair<Int, Int>? {
         val r = android.graphics.RectF(0f, 0f, w, h)
-        return pictureToScreen(p.x.coerceIn(0f, w - 1), p.y.coerceIn(0f, h - 1), r)
+        return pictureToScreen(p.x.clampIn(0f, w - 1), p.y.clampIn(0f, h - 1), r)
     }
 
 @Composable

@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kilon.agentvscreen.core.TaskLog
 import com.kilon.agentvscreen.host.Audit
+import com.kilon.agentvscreen.steps
 import com.kilon.agentvscreen.tr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -83,7 +84,7 @@ private fun iconBitmap(d: android.graphics.drawable.Drawable): android.graphics.
 
 /** What the user reads as the task's name: the agent's own title, else what happened where. */
 fun taskTitle(t: TaskLog.Task, app: String?): String = t.title
-    ?: if (app != null) tr("在${app}里操作了 ${t.commands} 步", "${t.commands} steps in $app") else tr("操作了 ${t.commands} 步", "${t.commands} steps")
+    ?: if (app != null) tr("在${app}里操作了 ${t.commands} 步", "${steps(t.commands)} in $app") else tr("操作了 ${t.commands} 步", steps(t.commands))
 
 /** How it ended, and whether that is good news. */
 fun taskOutcome(t: TaskLog.Task): Pair<String, Boolean> = when {
@@ -153,7 +154,7 @@ fun TaskRow(t: TaskLog.Task, onClick: () -> Unit) {
             Text(taskTitle(t, app), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row {
                 Text(word, fontSize = 12.5.sp, color = if (good) Palette.takeover else Palette.stopped)
-                Text(" · ${t.commands} " + tr("步", "steps") + " · " + took(t) + " · " + hhmm(t.start) + " · " + com.kilon.agentvscreen.api.Agents.nameOfSession(t.session), fontSize = 12.5.sp,
+                Text(" · " + steps(t.commands) + " · " + took(t) + " · " + hhmm(t.start) + " · " + com.kilon.agentvscreen.api.Agents.nameOfSession(t.session), fontSize = 12.5.sp,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
@@ -177,7 +178,7 @@ fun TaskCard(t: TaskLog.Task, onClick: () -> Unit) {
                 Text(taskTitle(t, app), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Row {
                     Text(word, fontSize = 12.5.sp, color = if (good) Palette.takeover else Palette.stopped)
-                    Text(" · ${t.commands} " + tr("步", "steps") + " · " + took(t) + " · " + com.kilon.agentvscreen.api.Agents.nameOfSession(t.session), fontSize = 12.5.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(" · " + steps(t.commands) + " · " + took(t) + " · " + com.kilon.agentvscreen.api.Agents.nameOfSession(t.session), fontSize = 12.5.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
@@ -215,7 +216,7 @@ fun TaskPage(id: Long) {
     MiuixPage(taskTitle(t, app), subtitle = hhmm(t.start) + " · " + com.kilon.agentvscreen.api.Agents.nameOfSession(t.session)) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(word, fontSize = 14.sp, color = if (good) Palette.takeover else Palette.stopped)
-            Text(" · ${t.commands} " + tr("步", "steps") + " · " + took(t) + (app?.let { " · $it" } ?: ""), fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            Text(" · " + steps(t.commands) + " · " + took(t) + (app?.let { " · $it" } ?: ""), fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
         }
         if (t.frames.isNotEmpty()) Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             (0 until 4).forEach { i ->
