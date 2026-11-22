@@ -102,10 +102,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import top.yukonga.miuix.kmp.basic.SnackbarHostState
 
 /** Home: is it running, is it set up, how an agent connects, the few settings, and diagnostics.
- * Also implements AppHost (1.4.0's AppRoot contract) so the new App pages compile; the fork keeps
- * showing this Home UI instead of AppRoot. */
+ * Also implements AppHost (1.4.0's AppRoot contract) so the new App pages compile.
+ * v23: the activity now hosts AppRoot (four tabs + page stack, upstream 1.4.2-beta5 UI); the old
+ * single-page Home() below is kept, unused, so the switch can be rolled back by restoring one line. */
 class MainActivity : ComponentActivity(), AppHost {
     companion object {
         const val EXTRA_PAGE = "page"
@@ -134,6 +136,8 @@ class MainActivity : ComponentActivity(), AppHost {
         }
     }
 
+    private val snack = SnackbarHostState()
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -142,7 +146,9 @@ class MainActivity : ComponentActivity(), AppHost {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        setContent { AvsTheme { Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { Home() } } }
+        if (MainDisplay.moved(this)) return
+        val page = intent?.getStringExtra(EXTRA_PAGE)
+        setContent { AvsTheme { AppRoot(this, routeOf(page)?.takeIf { it != Route.Connect }, snack, tabOf(page)) } }
     }
 
     override fun onResume() {
