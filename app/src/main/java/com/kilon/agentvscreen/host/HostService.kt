@@ -47,13 +47,27 @@ class HostService : Service() {
         private const val CHANNEL = "agent_vscreen_host"
         private const val NOTE_ID = 7001
         const val ACTION_STOP = "com.kilon.agentvscreen.STOP"
+        const val ACTION_PAUSE = "com.kilon.agentvscreen.PAUSE"
+        const val ACTION_ON = "com.kilon.agentvscreen.ON"
         const val ACTION_ALLOW = "com.kilon.agentvscreen.ALLOW"
         const val ACTION_SHOW_WINDOW = "com.kilon.agentvscreen.SHOW_WINDOW"
+        const val ACTION_HAND_BACK = "com.kilon.agentvscreen.HAND_BACK"
         private const val STOP_CHANNEL = "agent_vscreen_stopped"
         private const val STOP_NOTE_ID = 7002
 
+        /**
+         * 1.3.0: a start sent and not yet foreground. Stopping the service then makes Android kill the app
+         * (ForegroundServiceDidNotStartInTimeException); such a stop waits until the service is foreground.
+         */
+        @Volatile private var pendingAt = 0L
+        @Volatile private var stopWhenUp = false
+        /** Android allows 10 s for startForeground; a start older than that is not waited for. */
+        private val pending get() = pendingAt > 0 && android.os.SystemClock.elapsedRealtime() - pendingAt < 10_000L
+
         fun start(ctx: Context) {
             val i = Intent(ctx, HostService::class.java)
+            stopWhenUp = false
+            if (!isAlive) pendingAt = android.os.SystemClock.elapsedRealtime()
             runCatching { if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i) }
                 .onFailure {
                     // Android 12+ refuses to start a foreground service from the background (e.g. the process was
@@ -82,7 +96,27 @@ class HostService : Service() {
             }, "vscreen-shell-start").apply { isDaemon = true }.start()
         }
 
-        fun stop(ctx: Context) { ctx.stopService(Intent(ctx, HostService::class.java)) }
+        fun stop(ctx: Context) { if (pending) stopWhenUp = true else ctx.stopService(Intent(ctx, HostService::class.java)) }
+
+        /**
+         * 1.4.0-beta5: the local server outlives the service unless the user turned it off. On demand, the app's
+         * process often lives on without the service (the accessibility service keeps it), and a server that went with
+         * the service left agents a refused connection they could do nothing about. Now the process keeps listening and
+         * the first request wakes the service ([wakeFor]).
+         */
+        fun ensureServer(ctx: Context): ApiServer = synchronized(this) {
+            server ?: ApiServer(ctx.applicationContext).also { server = it; it.start(ApiConfig.port) }
+        }
+
+        fun dropServer() = synchronized(this) { server?.onChange = null; server?.stop(); server = null }
+
+        /** A request arrived while the service sleeps: wake it and wait up to 8 s for it (false: off, or it did not come). */
+        fun wakeFor(ctx: Context, why: String): Boolean {
+            if (!ServiceControl.wake(ctx, why)) return false
+            val until = android.os.SystemClock.elapsedRealtime() + 8_000L
+            while (!isAlive && android.os.SystemClock.elapsedRealtime() < until) Thread.sleep(100)
+            return isAlive
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -108,14 +142,30 @@ class HostService : Service() {
                 } finally { if (wakeLock?.isHeld == true) wakeLock?.release() }
             }
         }
+        pendingAt = 0L
         BackgroundOperation.setEnabled(true)
-        server = ApiServer(applicationContext).also { it.onChange = { renotify() }; it.start(ApiConfig.port) }
+        ensureServer(applicationContext).onChange = { renotify() }
         Overlay.attach(applicationContext)
         com.kilon.agentvscreen.core.VScreenTerminalHistory.init(applicationContext)
         Presence.start(applicationContext)
         A11yHeal.maybeHeal(applicationContext, "service start")
         Tailnet.sync(applicationContext)
         com.kilon.agentvscreen.core.VScreenPower.heal(applicationContext, "service start")
+        // 1.4.0-beta2: read a known picture once with both OCR engines, so a broken one is logged (and said in every
+        // reply) before an agent's first look, not discovered from missing words.
+        com.kilon.agentvscreen.core.VScreenOwnership.start(applicationContext)
+        if (com.kilon.agentvscreen.core.VScreenOcr.selfTestReport == null) Thread({ runCatching { com.kilon.agentvscreen.core.VScreenOcr.selfTest(applicationContext) } }, "ocr-selftest").start()
+        // 1.3 beta4: woken while hidden: go back once nothing needs the service (ServiceControl.shouldSleep).
+        sleeper = scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(60_000L)
+                if (ServiceControl.shouldSleep(applicationContext)) {
+                    AppLogger.info("HostService", "nothing needs the service: hidden again")
+                    BackgroundOperation.stopAndRelease(tr("用完了，自动收起", "Done: hidden again"))
+                    stopSelf(); break
+                }
+            }
+        }
         // 1.1.6: the Stop lock and a hidden window are never silent: both live in the notification shade.
         watch = scope.launch {
             kotlinx.coroutines.flow.combine(
@@ -130,6 +180,7 @@ class HostService : Service() {
     /** CPU only, ported from android-virtual-screen: held while a command is actually running, released when idle. */
     private var wakeLock: PowerManager.WakeLock? = null
     private var wakeJob: kotlinx.coroutines.Job? = null
+    private var sleeper: kotlinx.coroutines.Job? = null
 
     /**
      * A separate, visible notification while the user's Stop holds: the user may have pressed it (or closed the screen
@@ -141,7 +192,7 @@ class HostService : Service() {
         if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(STOP_CHANNEL) == null)
             nm.createNotificationChannel(NotificationChannel(STOP_CHANNEL, tr("AI 已停止", "AI stopped"), NotificationManager.IMPORTANCE_DEFAULT))
         val allow = PendingIntent.getService(this, 3, Intent(this, HostService::class.java).setAction(ACTION_ALLOW), PendingIntent.FLAG_IMMUTABLE)
-        val open = PendingIntent.getActivity(this, 4, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val open = PendingIntent.getActivity(this, 4, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE, com.kilon.agentvscreen.ui.MainDisplay.options())
         val at = BackgroundOperation.state.value.stoppedAt.takeIf { it > 0 }?.let { java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(it)) }
         val n = NotificationCompat.Builder(this, STOP_CHANNEL)
             .setSmallIcon(com.kilon.agentvscreen.R.drawable.ic_stat)
@@ -158,12 +209,18 @@ class HostService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            Prefs.setServiceOn(this, false)
+        if (stopWhenUp) { stopWhenUp = false; AppLogger.info("HostService", "stopped as asked while it was starting"); stopSelf(); return START_NOT_STICKY }
+        if (intent?.action == ACTION_STOP || intent?.action == ACTION_PAUSE) {
+            // 1.4.0-beta4: the notification's button turns it off (the same as "Off" behind the power button): out of
+            // the shade at once and not woken again. "Hide" was woken right back by the next agent command, so the
+            // notification could not be got rid of.
+            ServiceControl.block(this, "notification")
             stopSelf(); return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_ON) ServiceControl.turnOn(this, "notification")
         if (intent?.action == ACTION_ALLOW) { BackgroundOperation.userResume(); return START_STICKY }
         if (intent?.action == ACTION_SHOW_WINDOW) { BackgroundOperation.showWindow(); return START_STICKY }
+        if (intent?.action == ACTION_HAND_BACK) { intent.getStringExtra("pkg")?.let { p -> Thread { com.kilon.agentvscreen.core.VScreenOwnership.handBack(applicationContext, p, "notification") }.start() }; return START_STICKY }
         if (intent?.action == Consent.ACTION) { Consent.answer(applicationContext, intent.getIntExtra("id", -1), intent.getBooleanExtra("allow", false)); return START_STICKY }
         // Started again (the user opened the app, boot, update): whatever failed before gets another go now.
         if (!Liveness.foreground) goForeground()
@@ -194,14 +251,15 @@ class HostService : Service() {
     }
 
     override fun onDestroy() {
-        watch?.cancel()
+        watch?.cancel(); sleeper?.cancel()
         wakeJob?.cancel(); wakeJob = null
         if (wakeLock?.isHeld == true) wakeLock?.release()
-        Tailnet.stop()
+        Tailnet.stop("service destroyed")
         com.kilon.agentvscreen.host.quiet("HostService:167") { getSystemService(NotificationManager::class.java)?.cancel(STOP_NOTE_ID) }
         Overlay.detach()
         Presence.stop()
-        server?.onChange = null; server?.stop(); server = null
+        // On demand the server stays (the next request wakes the service); off, it goes with the service.
+        if (ServiceControl.now(this) == ServiceControl.State.BLOCKED) dropServer() else server?.onChange = null
         Liveness.serviceGone()
         if (!Prefs.serviceOn(this)) BackgroundOperation.setEnabled(false)
         isAlive = false
@@ -212,7 +270,7 @@ class HostService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26 && nm?.getNotificationChannel(CHANNEL) == null)
             nm?.createNotificationChannel(NotificationChannel(CHANNEL, tr("Agent-VScreen 服务", "Agent-VScreen service"), NotificationManager.IMPORTANCE_LOW))
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE, com.kilon.agentvscreen.ui.MainDisplay.options())
         val stop = PendingIntent.getService(this, 1, Intent(this, HostService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         val err = server?.lastError ?: Liveness.problem()
         val s = BackgroundOperation.state.value
@@ -223,6 +281,7 @@ class HostService : Service() {
             .setContentTitle(when {
                 s.userStopped -> tr("Agent-VScreen · AI 已停止", "Agent-VScreen · AI stopped")
                 s.windowHidden && s.displayId != null -> tr("Agent-VScreen · AI 在后台工作（小窗已收起）", "Agent-VScreen · AI working in the background (window hidden)")
+                ServiceControl.awakeOnDemand(this) -> tr("Agent-VScreen · 被 agent 叫醒，用完自动收起", "Agent-VScreen · woken by an agent, hides again when done")
                 else -> tr("Agent-VScreen 服务运行中", "Agent-VScreen service running")
             })
             .setContentText(err ?: "$where · CLI / HTTP / MCP")
@@ -234,8 +293,10 @@ class HostService : Service() {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
         if (s.windowHidden && s.displayId != null)
             b.addAction(0, tr("显示小窗", "Show window"), PendingIntent.getService(this, 5, Intent(this, HostService::class.java).setAction(ACTION_SHOW_WINDOW), PendingIntent.FLAG_IMMUTABLE))
-        else b.addAction(0, tr("查看副屏", "View screen"), PendingIntent.getActivity(this, 2, Intent(this, com.kilon.agentvscreen.ui.FullscreenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE))
-        return b.addAction(0, tr("停止服务", "Stop service"), stop).build()
+        else b.addAction(0, tr("查看副屏", "View screen"), PendingIntent.getActivity(this, 2, com.kilon.agentvscreen.ui.Surface.liveIntent(this), PendingIntent.FLAG_IMMUTABLE, com.kilon.agentvscreen.ui.MainDisplay.options()))
+        // 1.3.0: the button says what it does to remote access: with the built-in Tailscale on, hiding stops it.
+        val remote = Tailnet.Mode.BUILTIN == com.kilon.agentvscreen.api.ApiConfig.tailnetMode
+        return b.addAction(0, if (remote) tr("关闭（远程断开）", "Off (remote goes offline)") else tr("关闭", "Off"), stop).build()
     }
 }
 
@@ -244,4 +305,11 @@ object Prefs {
     private fun p(ctx: Context) = ctx.getSharedPreferences("agent_vscreen", Context.MODE_PRIVATE)
     fun serviceOn(ctx: Context) = p(ctx).getBoolean("service_on", true)
     fun setServiceOn(ctx: Context, on: Boolean) { p(ctx).edit().putBoolean("service_on", on).apply() }
+    /**
+     * 1.3 beta2: the service is off only until the next booked window ("pause"), not for good. Only the user sets it
+     * (the switch on the home page); a booking alone never turns a service the user switched off back on.
+     */
+    /** 1.3 beta4: the user blocked agent access (really off; nothing wakes the service). */
+    fun blocked(ctx: Context) = p(ctx).getBoolean("agents_blocked", false)
+    fun setBlocked(ctx: Context, on: Boolean) { p(ctx).edit().putBoolean("agents_blocked", on).apply() }
 }

@@ -1,0 +1,76 @@
+# Earlier releases
+
+The latest release notes are in the [README](../README.md).
+
+## What's new in 1.3.0
+
+**One step language for scripts, saved segments and lessons**
+
+- `*` in words is any characters: `tap *Bluetooth*` taps the item holding it, `wait text:Total*items`; `words@2` is the second place from the top, `@-1` the last. When the same words are in several places, the reply marks each with its `@N`.
+- Flow: `try <step>` or `try { … }` (not found or not as expected: skip and go on); `if text:Close { tap Close } else { back }`; `repeat 3 { scroll down }`, `repeat { scroll down } until text:End`. Braces may span lines and nest. A mistake runs nothing and says how to write it.
+- `note save <name> "steps"` stores or rewrites a segment without running it, taught ones too.
+- **Human pacing**: `act --human`, or `note human on` to keep it for an app. A random pause before each action, taps slightly off-centre inside the element with uneven holds, varied swipe and drag durations and ends, typing 1–3 characters at a time. Waits and conditions are unchanged.
+
+**You teach it, it asks you**
+
+- **Teach it by doing it**: do it once on the background screen and it is saved as a segment agents can replay. Take over the screen, tap the record key in the bottom bar, work as usual and tap Done; the review page says where each step came from, lets you untick slips and name it. A tap on words becomes `tap <words>` (found again when the layout moves); only when no words name the place is it a point. Words that appear, or the app that comes up, after a step become its `until`, so the replay waits for the same result. Typed words become a blank `{1}` that agents fill with `use <name> <values>…`; passwords are never kept. Agents can ask for a lesson with `vscreen teach "what to show"`; "Show it" on the phone starts recording right away.
+- **Show me**: `vscreen ask "Which one do you mean?"` puts the question on the phone; you tap the place on a picture of the background screen and the agent gets the point and the element there. Boxes, choices and text answers work too; with `--async` it waits until you answer.
+- **Lessons are smoother**: "Show it" takes over and records at once, "Done" also hands the screen back. A tap on a search result after typing is kept as "the N-th item holding the typed value" (`tap *{1}*@2`), so replaying with another value taps by content, not by place. A saved lesson keeps one contact sheet of its key steps (red rings mark taps); agents get it with the teach reply and again with `note show <name>`. The app's Schedules & lessons page searches lessons, deletes several at once and shows blocks indented.
+- **The floating window tells you when it has a question**: the folded tab turns into a violet question mark; expand it or go full screen and answer yes/no and choices right there.
+
+**Seeing clearly, tapping right**
+
+- **Checks judge only what came after the action**: `until text:…` counts words that appeared after the action, once the app reacted and the picture settled; when nothing changed, the reply says the app did not react.
+- **Numbers belong to one page**: on a new page an old `#N` is `STALE_ELEMENT` and never lands on the same words there.
+- **Areas that keep moving** (videos, live streams, carousels) are recognized: they no longer slow every step or list bullet comments as changes.
+- **Seeing your own taps**: the [Meanwhile] sheet has a frame before each action with where it touched circled, and spare places show what actions led to. `vscreen frames` looks back at the recording: longer, denser or a given stretch.
+- **One element per place**: OCR no longer repeats words the app's own elements carry; `collect` gathers by cards and keeps two columns apart, leaves tab bars out, and confirms the end with a second swipe elsewhere.
+- **Word taps are faster**: `tap <words>` looks in the app's own elements first and needs no full-screen OCR when they settle it.
+- **Time as it was spent**: every reply says how long the phone took and on what; the command and the liveness check go out together, and pictures are smaller.
+
+**On call, or fully out of the way**
+
+- **Schedules**: `vscreen schedule "weekdays 07:00"` books when an agent will use the phone; before each time the service is started and checked, and you are told in time if something blocks it. One-off bookings too (`today 10:30`). `ready` at the top of `status` says whether it can be used.
+- **Always on / hidden / blocked**: the switch on keeps it running; off hides it (no notification, nothing in the background) while a local agent or a booking can still wake it, and it hides again afterwards; "Block agent access" is really off.
+- **The background screen is muted**: its apps make no sound on the phone.
+- **Main-screen notes only when we disturbed it**: you switching apps on the main screen is no longer reported.
+- **Agents learn about app updates**: an agent's next use of vscreen shows what changed for it and asks it to refresh its note.
+
+**Remote access that holds**
+
+- **Built-in Tailscale**: one node at a time that lives and dies with the app's process, so a restart by the system no longer leaves the phone unreachable for minutes; the saved login is kept while the server cannot be reached ("dropped, reconnecting"), so you are not asked to log in again; "Connected" is the real link state, with the relay and how often it dropped.
+- **A token is enough over the built-in Tailscale**: no signing, and MCP clients connect remotely as they are.
+- **The CLI no longer hangs**: an unresponsive local app is woken and tried again; when the app restarts or stops answering for a minute during a command, the CLI stops and says why; a remote phone that does not answer is explained (hidden, blocked, offline, logged out). `VSCREEN_PROXY` sets a proxy.
+- The log and `status` record why the previous app process ended, and when the app went to the background, was frozen or the node stalled.
+
+**The app**
+
+- The home page holds the switch, the screen, anything waiting for you and a set of tiles (Connect, Permissions, Screen & window, Schedules & lessons, Activity log, Setup), each with its one key fact; explanations sit behind "?". The app, the floating window and full screen share one violet glass look.
+- **Check for updates**: "Check for updates" on the home list looks at the GitHub releases and shows what's new with a download link; the app also checks quietly at most once a day.
+- The Shizuku grant button always answers: already granted, Shizuku not running, refused before or no dialog shown — each is said and leads you to the right place; the grant state is read again when you come back to the app.
+
+Not verified on every phone: whether vendor background managers let exact alarms and the wake broadcast through for a frozen app; whether muting with `PLAY_AUDIO` works for every player on MagicOS.
+
+## What's new in 1.2.0
+
+This version rebuilds the command gate, the reply format, the security model and the guide for agents, and went through two real-phone regression rounds with [docs/TASKS.md](TASKS.md) (Honor Magic 7, MagicOS 11). The upgrade table from 1.1 is in section 9 of [API.md](../API.md).
+
+- **Structured results**: every reply carries `ok`, `code` and `next` (look at the screen / fix the command / ask the user / retry later), plus each step's status, the screen's elements and the notes. A stretch that stops at a step is a failure; no reading text to find out. The new API is `/v2`; `/v1` is unchanged and stays for one more version.
+- **One command table**: option checks, help, MCP tool schemas and the docs are generated from it. MCP has one tool per command besides `vscreen`.
+- **More precise taps**: text that appears several times is listed with coordinates instead of tapping the first; a `#number` whose element moved away is not tapped at its old place; an action that changed nothing is flagged.
+- **Shorter waits**: a page left with only a spinner or blinking cursor counts as settled. Perception is driven by new frames.
+- **One input path**: taps, swipes and keys are injected by the display service; dumpsys parsing and shell `input` are gone.
+- **A token per agent**: look-only / operate / everything, revoked separately, with separate sessions.
+- **Signed requests**: from another device the token never travels, requests cannot be replayed or altered, and replies are verified. The CLI does it by itself.
+- **The user confirms on the phone**: payment, irreversible steps, force-stop, taking an app off the main screen, and apps set to "ask every time". A flag added by the agent no longer counts. A trusted agent can be given 30 minutes without confirmations.
+- **Activity log**: who ran which command, when, with what result. Typed text is recorded as a length only.
+- **Harder to knock over**: connection cap, request size and time limits; a command stops when its caller disconnects; a resent request never runs twice; long work can run `--async` and be collected with `task`; commands queue.
+- **Events are not lost**: kept until the next fetch, re-fetchable, stored on disk; watches resume after an app restart; the event broadcast goes only to an app you name.
+- **A rewritten guide for agents**: built around one loop (look → act → check), with what to do next for each result code; `vscreen guide` is one page.
+
+- **Hands-off by default**: Permissions in the app has two levels. The default, "hands-off", asks you on the phone only for the step that actually spends money (pay, place order, transfer, top up) and for apps you set to "ask every time"; "careful" also asks for irreversible buttons such as delete, steps toward a purchase, force-stop and taking an app off the main screen. The "clear" button next to an input box is no longer treated as irreversible.
+- **A new page layout**: the home page goes Connect → Permissions → Settings → Activity log; permissions live in one place (level, app rules, tokens) and settings are grouped (floating window / background screen / reading and recording).
+- **A smoother floating window**: its picture is scaled to the size shown at 20 frames a second (30 while you control the screen) instead of the agent's full-size frames; moving the window updates its position once per display frame, so it stays under the finger; after taking over, your finger reaches the screen as it moves, so lists follow it. A landscape screen opens almost as wide as the phone, and each orientation keeps its own size.
+- **Look-only tokens can look**: their `act` (no steps or only waits) looks at the screen in use; `stop --force` and `handoff in` need the "everything" scope.
+- **Numbers never point at the wrong element**: on one screen a number names one element; after a scroll the same element keeps its number and new ones get new numbers. A number whose element left the screen gives STALE_ELEMENT instead of tapping something else.
+- **Floating window**: a landscape screen opens at about three quarters of the phone's width, and the whole window stays on screen when it appears or turns.

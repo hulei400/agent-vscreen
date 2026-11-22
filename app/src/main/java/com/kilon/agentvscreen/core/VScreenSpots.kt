@@ -2,7 +2,6 @@ package com.kilon.agentvscreen.core
 
 import android.graphics.Bitmap
 import android.graphics.Rect
-import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -111,15 +110,6 @@ object VScreenSpots {
     /** --shape words: an outline (circle/round, square, triangle, blob) and/or filled / ring (= hollow); comma = all must hold. */
     val SHAPE_WORDS = listOf("circle", "round", "square", "triangle", "blob", "filled", "ring", "hollow")
 
-    fun shapeMatches(s: Spot, words: List<String>): Boolean = words.all { wd ->
-        when (wd) {
-            "circle", "round" -> s.shape == "circle"
-            "ring", "hollow" -> s.hollow
-            "filled" -> !s.hollow
-            else -> s.shape == wd
-        }
-    }
-
     fun hex(c: Int) = String.format("#%06X", c and 0xFFFFFF)
 
     fun parseColor(s: String): Int? = runCatching {
@@ -145,30 +135,4 @@ object VScreenSpots {
         val db = (a and 255) - (b and 255)
         return sqrt((dr * dr + dg * dg + db * db).toDouble()).roundToInt()
     }
-
-    /**
-     * Fraction of points along a polyline (screen px) whose colour changed between two frames
-     * (same size): did the drag leave a mark (a line drawn, a piece moved)? Null when not comparable.
-     */
-    fun pathChanged(before: Bitmap?, after: Bitmap?, pts: List<Pair<Int, Int>>, step: Int = 8, threshold: Int = 60): Double? {
-        if (before == null || after == null || before.isRecycled || after.isRecycled) return null
-        if (before.width != after.width || before.height != after.height || pts.size < 2) return null
-        var n = 0; var changed = 0
-        for ((a, b) in pts.zipWithNext()) {
-            val len = sqrt(((b.first - a.first) * (b.first - a.first) + (b.second - a.second) * (b.second - a.second)).toDouble())
-            val steps = maxOf(1, (len / step).toInt())
-            // Skip the ends: the finger's own start/end spots (stations, buttons) are not the mark.
-            for (s in 1 until steps) {
-                val t = s.toDouble() / steps
-                val x = (a.first + (b.first - a.first) * t).roundToInt().coerceIn(0, before.width - 1)
-                val y = (a.second + (b.second - a.second) * t).roundToInt().coerceIn(0, before.height - 1)
-                n++
-                if (dist(before.getPixel(x, y), after.getPixel(x, y)) > threshold) changed++
-            }
-        }
-        if (n == 0) return null
-        return (changed * 100.0 / n).roundToInt() / 100.0
-    }
-
-    @Suppress("unused") private fun absDiff(a: Int, b: Int) = abs(a - b)
 }

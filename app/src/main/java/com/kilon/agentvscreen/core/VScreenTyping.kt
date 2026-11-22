@@ -21,30 +21,32 @@ import java.util.concurrent.TimeUnit
  * fact; a password field gives its length only. The typed text is never logged.
  */
 object VScreenTyping {
+    /** 1.3.0-beta14: the focused field, for the full screen page's box that mirrors it. [key] tells fields apart. */
+    class FieldNow(val text: String, val password: Boolean, val key: String)
+
+    fun fieldNow(displayId: Int): FieldNow? = runCatching {
+        focusedEditable(displayId)?.let { n ->
+            val b = Rect().also { n.getBoundsInScreen(it) }
+            FieldNow(if (n.isPassword) "" else fieldText(n), n.isPassword, "${n.viewIdResourceName}@${b.left},${b.top},${b.right},${b.bottom}")
+        }
+    }.getOrNull()
+
     /**
-     * Type [text] into the focused field of [displayId]: accessibility
-     * SET_TEXT first (works for Chinese), ASCII `input text` second,
-     * clipboard + PASTE key last. Returns the method used.
+     * 1.3.0-beta14: make the focused field read [value] (the user's box mirrors it: typing, deleting, the keyboard's
+     * own keys). Accessibility writes the whole value; without it, the difference from [was] goes as delete keys and
+     * then the added text (keys, or paste for non-ASCII). Replaces the old one-shot "append what was sent", which read
+     * the field's hint as its content ("搜索设置项" + "蓝牙") and could not delete.
      */
-    @Throws(ActionError::class)
-    fun typeText(displayId: Int, text: String, append: Boolean): String {
+    fun setField(displayId: Int, value: String, was: String) {
         val svc = VScreenAccessibilityService.getInstance()
-        if (svc != null) {
-            val focused = BackgroundOperation.nodeRoots(displayId).firstNotNullOfOrNull {
-                runCatching { it.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }.getOrNull()
-            }
-            if (focused != null && focused.isEditable) {
-                val value = if (append) (focused.text?.toString().orEmpty() + text) else text
-                if (svc.setNodeText(focused, value)) return "accessibility SET_TEXT"
-            }
-        }
-        if (text.all { it.code in 32..126 }) {
-            val r = VScreenShell.typeKeys(displayId, text)
-            if (r.ok) return tr("按键注入", "key injection")
-            throw ActionError(r.code, r.message)
-        }
-        pasteText(displayId, text)
-        return tr("clipboard paste（无障碍未找到焦点输入框，已用剪贴板粘贴；请读屏核对）", "clipboard paste (accessibility found no focused input box, pasted via clipboard; check the screen)")
+        val node = if (svc != null) runCatching { focusedEditable(displayId) }.getOrNull() else null
+        if (node != null && !node.isPassword && svc!!.setNodeText(node, value)) return
+        val common = was.commonPrefixWith(value).length
+        repeat(was.length - common) { VScreenShell.key(displayId, "del") }
+        val add = value.substring(common)
+        if (add.isEmpty()) return
+        if (add.all { it.code in 32..126 }) { val r = VScreenShell.typeKeys(displayId, add); if (!r.ok) throw ActionError(r.code, r.message) }
+        else pasteText(displayId, add)
     }
 
     /**
@@ -61,22 +63,20 @@ object VScreenTyping {
         val roots = BackgroundOperation.nodeRoots(displayId)
         roots.firstNotNullOfOrNull { runCatching { it.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }.getOrNull() }
             ?.takeIf { it.isEditable }?.let { return it }
-        val edits = ArrayList<AccessibilityNodeInfo>()
-        fun walk(n: AccessibilityNodeInfo?, depth: Int) {
-            if (n == null || depth > 50 || edits.size > 16) return
-            if (n.isVisibleToUser && n.isEditable) edits += n
-            for (i in 0 until n.childCount) walk(runCatching { n.getChild(i) }.getOrNull(), depth + 1)
-        }
-        roots.forEach { walk(it, 0) }
-        edits.firstOrNull { it.isFocused }?.let { return it }
-        if (at != null) return edits.filter { e -> Rect().also { e.getBoundsInScreen(it) }.let { r -> r.contains(at.first, at.second) } }
-            .minByOrNull { e -> Rect().also { e.getBoundsInScreen(it) }.let { r -> r.width().toLong() * r.height() } }
+        val edits = A11yTree.snapshot(displayId).editables()
+        edits.firstOrNull { it.focused }?.let { return it.info }
+        // 1.4.0-beta13: [at] is a frame point; the bounds are input space (see VScreenDisplay.toFrame).
+        val d = BackgroundOperation.displayById(displayId)
+        if (at != null) return edits.filter { (d?.toFrame(it.box) ?: it.box).contains(at.first, at.second) }.minByOrNull { it.box.width().toLong() * it.box.height() }?.info
         return null
     }
 
+    /** What the field holds: never its hint (some apps report the hint as text without saying so). */
     private fun fieldText(n: AccessibilityNodeInfo): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && n.isShowingHintText) return ""
-        return n.text?.toString().orEmpty()
+        val t = n.text?.toString().orEmpty()
+        val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) n.hintText?.toString() else null
+        return if (!hint.isNullOrEmpty() && t == hint) "" else t
     }
 
     /**
@@ -86,7 +86,10 @@ object VScreenTyping {
      */
     /** What typing did: the method, the field it went to (bounds, id) and what that field reads afterwards. */
     /** [checked] false = accessibility could not look at the screen, so [field] null says nothing about focus. */
-    class TypeFact(val method: String, val field: String?, val bounds: Rect?, val fieldId: String?, val checked: Boolean = true, val password: Boolean = false)
+    class TypeFact(val method: String, val field: String?, val bounds: Rect?, val fieldId: String?, val checked: Boolean = true, val password: Boolean = false,
+                   /** 1.3.0-beta16: keys or paste went out, but the field reads exactly what it read before (a web page or a
+                    *  self-drawn box whose accessibility text is its placeholder): its content cannot be read back. */
+                   val unreadable: Boolean = false)
 
     /** The field that has input focus now, as "id@l,t,r,b" (null: none / not visible to accessibility). */
     fun focusedFieldKey(displayId: Int): String? = runCatching {
@@ -105,13 +108,15 @@ object VScreenTyping {
         val svc = VScreenAccessibilityService.getInstance()
         val roots = if (svc != null) BackgroundOperation.nodeRoots(displayId) else emptyList()
         val a11y = svc != null && roots.isNotEmpty()
+        val d = BackgroundOperation.displayById(displayId)
         // Focus can land a moment after the tap (Flutter): look twice.
         val node = if (a11y) focusedEditable(displayId, tappedAt) ?: run { Thread.sleep(300); focusedEditable(displayId, tappedAt) } else null
-        val nb = node?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
+        val nbRaw = node?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
+        val nb = nbRaw?.let { d?.toFrame(it) ?: it }
         val nid = node?.viewIdResourceName?.substringAfterLast('/')
         // v0.5: the field with focus is not where the agent just tapped (a page's own box that accessibility cannot
         // see, while the address bar keeps focus): typing would land in the wrong place. Do not type; say where focus is.
-        if (tappedAt != null && nb != null && focusBefore != null && focusBefore == "${node.viewIdResourceName}@${nb.left},${nb.top},${nb.right},${nb.bottom}") {
+        if (tappedAt != null && nbRaw != null && nb != null && focusBefore != null && focusBefore == "${node.viewIdResourceName}@${nbRaw.left},${nbRaw.top},${nbRaw.right},${nbRaw.bottom}") {
             val slack = Rect(nb).apply { inset(-24, -24) }
             if (!slack.contains(tappedAt.first, tappedAt.second)) throw ActionError("FOCUS_ELSEWHERE",
                 tr("没有输入：有焦点的输入框在 [${nb.left},${nb.top},${nb.right},${nb.bottom}]" + (nid?.let { "（$it）" } ?: "") +
@@ -122,8 +127,10 @@ object VScreenTyping {
                     "check which element in [Now] is \"input\", or act differently (e.g. tap number keys on the screen)"))
         }
         val before = node?.let { fieldText(it) }.orEmpty()
+        val rawBefore = node?.text?.toString()
+        var wrote = false
         val method = when {
-            node != null && svc!!.setNodeText(node, if (append) before + text else text) -> tr("无障碍写入", "accessibility write")
+            node != null && svc!!.setNodeText(node, if (append) before + text else text) -> { wrote = true; tr("无障碍写入", "accessibility write") }
             text.all { it.code in 32..126 } -> {
                 val r = VScreenShell.typeKeys(displayId, text)
                 if (!r.ok) throw ActionError(r.code, r.message)
@@ -145,8 +152,9 @@ object VScreenTyping {
         }
         // A password box gives its length only: what is in it never leaves the phone.
         val now = after?.let { if (it.isPassword) "•".repeat(fieldText(it).length) else fieldText(it) }
-        val ab = after?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
-        return TypeFact(method, now, ab, after?.viewIdResourceName?.substringAfterLast('/'), password = after?.isPassword == true)
+        val ab = after?.let { n -> Rect().also { n.getBoundsInScreen(it) } }?.let { d?.toFrame(it) ?: it }
+        val unreadable = !wrote && after != null && !after.isPassword && now?.contains(text) != true && after.text?.toString() == rawBefore
+        return TypeFact(method, now, ab, after?.viewIdResourceName?.substringAfterLast('/'), password = after?.isPassword == true, unreadable = unreadable)
     }
 
     /** Put [text] on the clipboard and press PASTE on [displayId]'s focused field. */
@@ -165,7 +173,9 @@ object VScreenTyping {
         }
         latch.await(2, TimeUnit.SECONDS)
         if (!clipOk) throw ActionError("TYPE_FAILED", tr("无法写入剪贴板", "Cannot write the clipboard"))
-        val r = VScreenShell.key(displayId, "paste")
+        // 1.4.0-beta14 (test K6: the paste key did nothing in a web page, while ctrl+v there worked): paste with
+        // ctrl+v, the shortcut every text box handles (native boxes too); the paste key only when that cannot be sent.
+        val r = VScreenShell.key(displayId, "ctrl+v").takeIf { it.ok } ?: VScreenShell.key(displayId, "paste")
         if (!r.ok) throw ActionError(r.code, r.message)
         // Give the app a moment to read the clip, then do not leave our text on the clipboard.
         Thread.sleep(400)

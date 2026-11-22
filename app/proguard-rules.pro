@@ -6,3 +6,9 @@
 -keep class rikka.shizuku.** { *; }
 -keep class moe.shizuku.** { *; }
 -dontwarn org.slf4j.**
+# 1.4.0-beta2: ML Kit finds its parts by reflection (component registrars, factories); beta1's shrunk build returned
+# null for the text recognizer. Keep ML Kit and its play-services internals whole.
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_** { *; }
+-keep class com.google.android.gms.common.internal.** { *; }
+-keep class com.google.firebase.components.** { *; }

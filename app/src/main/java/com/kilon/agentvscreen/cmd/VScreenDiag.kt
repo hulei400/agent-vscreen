@@ -8,8 +8,6 @@ import com.kilon.agentvscreen.host.AppLogger
 import com.kilon.agentvscreen.host.Audit
 import com.kilon.agentvscreen.host.Swallowed
 import com.kilon.agentvscreen.tr
-import org.json.JSONArray
-import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -29,6 +27,9 @@ internal fun diagText(context: android.content.Context): String = buildString {
     append("device: ${dev.vendor} ${dev.brand} ${dev.model}, sdk ${dev.sdk}, vendor layer ${Vendor.current.javaClass.simpleName}, os ${dev.os}\n")
     append("connection: ${st.connection.name}" + (st.connectionError?.let { " ($it)" } ?: "") + ", screen: " + (st.displayId?.let { "display $it" } ?: "none") + ", tasks running: ${Tasks.running()}\n")
     append("queue: " + (VScreenOffloadHandler.queueHolder ?: "idle") + "\n")
+    // 1.4.0-beta2: a real reading on this phone, not the state of a flag.
+    append("\n" + tr("文字识别自检（本机真实识别一张已知图片）", "text recognition self-test (a real reading of a known picture on this phone)") + ":\n")
+    append(runCatching { com.kilon.agentvscreen.core.VScreenOcr.selfTest(context) }.getOrElse { "self-test crashed: ${it.javaClass.simpleName}: ${it.message}" }.prependIndent("  ") + "\n")
     val sw = Swallowed.snapshot()
     append("\n" + tr("被吞掉的异常（按位置计数）", "swallowed exceptions (count per site)") + ": " + (if (sw.isEmpty()) tr("无", "none") else "") + "\n")
     sw.sortedByDescending { it.second.count }.take(30).forEach { (tag, e) -> append("  $tag ×${e.count}  ${fmt.format(Date(e.at))}  ${e.last.take(160)}\n") }
@@ -39,10 +40,6 @@ internal fun diagText(context: android.content.Context): String = buildString {
     append("\n" + tr("应用日志（最后 150 行）", "app log (last 150 lines)") + ":\n")
     append(AppLogger.tail(150))
 }
-
-/** The same as JSON (the app's "export diagnostics" button shares the text). */
-internal fun diagJson(context: android.content.Context): JSONObject = JSONObject().put("text", diagText(context))
-    .put("swallowed", JSONArray(Swallowed.snapshot().map { JSONObject().put("site", it.first).put("count", it.second.count).put("last", it.second.last) }))
 
 /** For the app's own "copy diagnostics" button. */
 object Diag { fun text(context: android.content.Context): String = diagText(context) }

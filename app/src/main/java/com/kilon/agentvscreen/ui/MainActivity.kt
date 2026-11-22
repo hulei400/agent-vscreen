@@ -95,14 +95,50 @@ import com.kilon.agentvscreen.host.AppLogger
 import com.kilon.agentvscreen.host.HostService
 import com.kilon.agentvscreen.host.Prefs
 import com.kilon.agentvscreen.host.Setup
+import com.kilon.agentvscreen.host.ShizukuBackend
 import com.kilon.agentvscreen.host.ShizukuManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Home: is it running, is it set up, how an agent connects, the few settings, and diagnostics. */
-class MainActivity : ComponentActivity() {
+/** Home: is it running, is it set up, how an agent connects, the few settings, and diagnostics.
+ * Also implements AppHost (1.4.0's AppRoot contract) so the new App pages compile; the fork keeps
+ * showing this Home UI instead of AppRoot. */
+class MainActivity : ComponentActivity(), AppHost {
+    companion object {
+        const val EXTRA_PAGE = "page"
+
+        /** 1.4.0-beta11: the tab a page name opens (notifications open HOME, RECORDS, CONNECT …). */
+        fun tabOf(name: String?): Int = when (name?.uppercase()) { "RECORDS" -> TAB_RECORDS; "CONNECT" -> TAB_CONNECT; "SETTINGS" -> 3; else -> 0 }
+
+        /** A page asked for while the app is already open (it is singleTask: a notification tap reaches onNewIntent,
+         * not onCreate). AppRoot follows it. */
+        val pageRequests = MutableStateFlow<Pair<Long, String>?>(null)
+
+        /** A page name from a notification, a shortcut or a test: the route names, plus the 1.3 page names. */
+        fun routeOf(name: String?): Route? = when (name?.uppercase()) {
+            null, "", "MAIN" -> null
+            "CONNECT" -> Route.Connect
+            "REMOTE" -> Route.Remote
+            "TOKENS" -> Route.Tokens
+            "RULES", "PERMS" -> Route.Rules
+            "SCHEDULE", "SCHEDULES" -> Route.Schedules
+            "LESSONS" -> Route.Lessons
+            "LOG" -> Route.Log
+            "SETUP" -> Route.Setup
+            "DIAG" -> Route.Diag
+            "HELP" -> Route.Help
+            else -> null
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra(EXTRA_PAGE)?.let { pageRequests.value = System.nanoTime() to it }
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -114,15 +150,40 @@ class MainActivity : ComponentActivity() {
         // In front now, so a foreground service may start: repair a start the system refused in the background,
         // and retry a port that was taken.
         if (Prefs.serviceOn(this)) HostService.start(this)
+        com.kilon.agentvscreen.host.Updates.checkDaily(this)
         Overlay.refresh()
+        // Shizuku's answer can change while we are away: read it again.
+        ShizukuManager.refresh()
     }
 
-    private fun copy(label: String, text: String) {
+    override fun say(text: String) { Toast.makeText(this, text, Toast.LENGTH_SHORT).show() }
+
+    override fun recreateForLanguage() = recreate()
+
+    /** The grant button always ends in something the user can see (GitHub #2): Shizuku's dialog, or its own app with what to do. */
+    override fun grantShizuku() {
+        fun inManager() {
+            ShizukuManager.openShizukuApp(this)
+            say(tr("Shizuku 没有弹出授权框：在 Shizuku 的“授权应用”里打开 Agent-VScreen，再回来", "Shizuku showed no dialog: turn Agent-VScreen on under \"Authorized apps\" in Shizuku, then come back"))
+        }
+        when (ShizukuManager.requestPermission()) {
+            ShizukuBackend.Ask.ALREADY -> say(tr("Shizuku 已授权", "Shizuku is authorized"))
+            ShizukuBackend.Ask.NO_BINDER -> { ShizukuManager.openShizukuApp(this); say(tr("Shizuku 没在运行：先在 Shizuku 里启动它", "Shizuku is not running: start it in Shizuku first")) }
+            ShizukuBackend.Ask.DENIED_ON_RECORD, ShizukuBackend.Ask.FAILED -> inManager()
+            // A dialog should show; if no answer comes within 8 s, the request went nowhere.
+            ShizukuBackend.Ask.ASKED -> window.decorView.postDelayed({
+                ShizukuManager.refresh()
+                if (ShizukuManager.snapshot.value.state == ShizukuManager.State.NEED_PERMISSION && !isFinishing && hasWindowFocus()) inManager()
+            }, 8_000L)
+        }
+    }
+
+    override fun copy(label: String, text: String) {
         getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(label, text))
         Toast.makeText(this, tr("已复制：$label", "Copied: $label"), Toast.LENGTH_SHORT).show()
     }
 
-    private fun diagnostics(items: List<Setup.Item>): String {
+    override fun diagnostics(items: List<Setup.Item>): String {
         val s = BackgroundOperation.state.value
         return buildString {
             appendLine("Agent-VScreen ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}")

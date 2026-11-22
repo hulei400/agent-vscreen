@@ -9,7 +9,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.os.SystemClock
-import android.view.accessibility.AccessibilityNodeInfo
 import com.kilon.agentvscreen.cmd.NativeOffloadResult
 import com.kilon.agentvscreen.core.BackgroundOperation
 import com.kilon.agentvscreen.core.VScreenActivity
@@ -18,8 +17,6 @@ import com.kilon.agentvscreen.core.VScreenOcr
 import com.kilon.agentvscreen.core.VScreenPerception
 import com.kilon.agentvscreen.core.VScreenRecorder
 import com.kilon.agentvscreen.core.VScreenShell
-import java.io.File
-import java.io.FileOutputStream
 import kotlin.math.roundToInt
 
 // [vscreen] v49: the fixed four-block return of `act` and `launch`.
@@ -46,7 +43,9 @@ internal data class El(val n: Int, val text: String, val box: Rect, val fromA11y
                        val checked: Boolean? = null, val focused: Boolean = false, val password: Boolean = false,
                        val kind: ElKind = ElKind.TEXT,
                        /** EMPTY_INPUT / NO_TEXT: the view id or class; LINK: the length of the hidden text. */
-                       val hint: String? = null) {
+                       val hint: String? = null,
+                       /** 1.4.0-beta13: a search box the app draws itself (its view id or class says search): a control, not content. */
+                       val search: Boolean = false) {
     val placeholder: Boolean get() = kind != ElKind.TEXT
     /** Nothing can be done with it: plain words. */
     val plain: Boolean get() = !clickable && !editable && !scrollable && checked == null && !password
@@ -77,7 +76,34 @@ internal data class El(val n: Int, val text: String, val box: Rect, val fromA11y
         }
 }
 /** The elements last shown to a chat, for `#N` (bound to the screen generation they were read on). */
-internal class ElSet(val generation: Long, val atMs: Long, val list: List<El>)
+internal class ElSet(val generation: Long, val atMs: Long, val list: List<El>,
+                     /** 1.3: the page the list was read on (front activity, and elapsedRealtime of the read). */
+                     val activity: String? = null, val atElapsed: Long = 0L)
+
+/**
+ * 1.3, pure: the common shift between two lists of the same page (a scroll moves everything by about the same amount):
+ * the (dx, dy) most pairs of words that appear once in each list agree on, with how many agree. null = no such pairs.
+ */
+internal fun commonShift(prev: List<El>, now: List<El>): Triple<Int, Int, Int>? {
+    val a = prev.filter { !it.placeholder }.groupBy { it.key }.filterValues { it.size == 1 }
+    val b = now.filter { !it.placeholder }.groupBy { it.key }.filterValues { it.size == 1 }
+    val shifts = a.keys.intersect(b.keys).map { k -> val x = a[k]!![0]; val y = b[k]!![0]; (y.box.centerX() - x.box.centerX()) to (y.box.centerY() - x.box.centerY()) }
+    if (shifts.isEmpty()) return null
+    return shifts.map { s -> Triple(s.first, s.second, shifts.count { Math.abs(it.first - s.first) <= 24 && Math.abs(it.second - s.second) <= 24 }) }.maxByOrNull { it.third }
+}
+
+/**
+ * 1.3, pure: whether [now] is the same page as [prev] (maybe scrolled): enough of its elements are still there, in
+ * place or all moved by one common shift. Before, any element whose words were unique on both lists kept its number,
+ * so a page title that repeated the tapped row's words (设置 › 显示和亮度) took over the row's number on the new page.
+ */
+internal fun samePage(prev: List<El>, now: List<El>): Boolean {
+    if (prev.isEmpty() || now.isEmpty()) return false
+    val inPlace = now.count { e -> prev.any { sameEl(it, e) } }
+    val shifted = commonShift(prev, now)?.takeIf { it.first != 0 || it.second != 0 }?.third ?: 0
+    val need = maxOf(2, (minOf(prev.size, now.size) * 0.3).toInt())
+    return maxOf(inPlace, shifted) >= need
+}
 
 /** What 【这段时间】 says, plus the frames for its sheet. */
 internal class Since(val lines: List<String>, val changed: Boolean, val from: Long, val to: Long)
@@ -103,23 +129,26 @@ internal object Report {
 internal fun a11yRaw(d: VScreenDisplay): List<El> {
     val raw = ArrayList<El>()
     val screenArea = d.width.toLong() * d.height
-    var seen = 0
     // 1.1: a clickable container with no words of its own (a list row, a card, a search box drawn by the app) takes the
     // words of the plain text nodes inside it, and those nodes are not listed again: one line per thing a person
     // would tap, with the words they would read on it. A wordless node is listed only when it is small (an icon
     // button); big wordless wrappers are layout, not targets. Its view id (stable across rotating placeholder
     // words) is shown when the app gives one.
-    fun walk(n: AccessibilityNodeInfo?, depth: Int) {
-        if (n == null || depth > 50 || seen++ > 3_000 || raw.size > 400) return
-        val visible = n.isVisibleToUser
-        val text = if (visible) (n.text ?: n.contentDescription)?.toString()?.replace('\n', ' ')?.trim()?.takeIf { it.isNotEmpty() && !isJunkLabel(it) } else null
+    fun walk(node: com.kilon.agentvscreen.core.A11yTree.Node) {
+        if (raw.size > 400) return
+        val n = node.info
+        val visible = node.visible
+        val text = if (visible) node.words?.takeIf { !isJunkLabel(it) } else null
         val actionable = n.isClickable || n.isEditable || n.isCheckable || n.isScrollable
-        val b = Rect().also { n.getBoundsInScreen(it) }
+        // 1.4.0-beta13 (test L18a): the system gives bounds in INPUT space; everything we read, show and tap is in the
+        // upright frame space. They differ when the logical display is letterboxed in the picture (a rotated app on a
+        // screen built the other way); unmapped, a tap on "9" was named "beside 9" and element taps were mapped twice.
+        val b = d.toFrame(node.box)
         val inside = visible && b.width() > 0 && b.height() > 0 && b.centerX() in 0 until d.width && b.centerY() in 0 until d.height
         val area = b.width().toLong() * b.height()
         val big = area > screenArea / 4
         val start = raw.size
-        for (i in 0 until n.childCount) walk(runCatching { n.getChild(i) }.getOrNull(), depth + 1)
+        node.children.forEach { walk(it) }
         if (!inside || !(text != null || (actionable && !big) || n.isEditable)) return
         var words: Pair<ElKind, String>? = text?.let { tidy(it) }
         if (words == null && !n.isEditable && (n.isClickable || n.isCheckable)) {
@@ -140,9 +169,10 @@ internal fun a11yRaw(d: VScreenDisplay): List<El> {
         }
         raw.add(start.coerceAtMost(raw.size), El(0, if (kind == ElKind.TEXT) words!!.second else "", b, true,
             clickable = n.isClickable, editable = n.isEditable, scrollable = n.isScrollable,
-            checked = if (n.isCheckable) n.isChecked else null, focused = n.isFocused, password = n.isPassword, kind = kind, hint = hint))
+            checked = if (n.isCheckable) n.isChecked else null, focused = n.isFocused, password = n.isPassword, kind = kind, hint = hint,
+            search = n.isClickable && ((n.viewIdResourceName?.substringAfterLast('/') ?: "") + " " + (n.className ?: "")).contains("search", ignoreCase = true)))
     }
-    BackgroundOperation.nodeRoots(d.displayId).forEach { walk(it, 0) }
+    com.kilon.agentvscreen.core.A11yTree.snapshot(d.displayId).roots.forEach { walk(it) }
     // Same element at (nearly) the same place: once.
     val out = ArrayList<El>()
     for (r in raw) if (out.none { it.key == r.key && Math.abs(it.box.centerX() - r.box.centerX()) <= 20 && Math.abs(it.box.centerY() - r.box.centerY()) <= 20 }) out += r
@@ -155,6 +185,15 @@ internal fun isJunkLabel(t: String): Boolean = (HEXISH.matches(t) && t.any { it.
 
 private val DIGIT = Regex("[0-9]")
 
+/** Element words [l] say the OCR word [w]: one holds the other, or most of [w]'s characters (a misread glyph). */
+internal fun saysWord(l: String, w: String): Boolean {
+    if (l.isEmpty() || w.isEmpty()) return false
+    if (l.contains(w) || w.contains(l)) return true
+    val pool = l.groupingBy { it }.eachCount().toMutableMap()
+    val hit = w.count { c -> (pool[c] ?: 0).let { n -> if (n > 0) { pool[c] = n - 1; true } else false } }
+    return w.length >= 3 && hit * 10 >= w.length * 7
+}
+
 /**
  * The elements of one picture: accessibility nodes, then the OCR words no node already says, in reading order.
  * v0.5: when a node's text has digits and the picture shows different digits in its place (an accessibility tree
@@ -165,7 +204,35 @@ internal fun mergeElements(d: VScreenDisplay, a11y: List<El>, ocr: List<VScreenO
     val items = ocr.orEmpty().filter { !VScreenOcr.isJunk(it) && !isJunkLabel(it.text.trim()) && it.text.isNotBlank() }
     val out = ArrayList<El>()
     val usedOcr = HashSet<VScreenOcr.Item>()
-    for (a in a11y) {
+    // 1.4.0-beta6 (test: 计时器 listed as "计时器" and "O · 计时器"; every 哔哩哔哩 tab as "直播,7之1,标签" and "直播"):
+    // a tappable wrapper around a label is one place, not two. When an element holds a smaller element with words
+    // (its label) and the wrapper either says nothing or says the label plus extras (position, role), the label is
+    // the entry: it takes the wrapper's tap, and glyphs OCR read off the wrapper's icon go with the wrapper.
+    fun area(r: Rect) = r.width().toLong() * r.height()
+    val dropped = HashSet<El>(); val tappable = HashSet<El>()
+    for (w in a11y) {
+        if (w.scrollable || w.editable || w.kind == ElKind.LINK || w.kind == ElKind.EMPTY_INPUT) continue
+        val wn = VScreenOcr.norm(w.text)
+        val label = a11y.filter { c -> c !== w && c.kind == ElKind.TEXT && !c.editable && w.box.contains(c.box.centerX(), c.box.centerY()) && area(c.box) < area(w.box) }
+            .filter { c -> val cn = VScreenOcr.norm(c.text); cn.isNotEmpty() && (w.kind == ElKind.NO_TEXT || (wn != cn && wn.startsWith(cn))) }
+        // A wrapper with several labels (a whole list row) stays out of this: only a single label is its name.
+        // 1.4.0-beta8 (test: 计时器 still twice, "计时器" and "O · 计时器" 37 px apart): the label need not sit inside
+        // the wrapper's box. A wordless wrapper whose drawn words, glyphs aside, are exactly what one overlapping
+        // element with words says is that element's place too.
+        val one = label.singleOrNull() ?: run {
+            if (w.kind != ElKind.NO_TEXT || label.isNotEmpty()) return@run null
+            val drawn = items.filter { it !in usedOcr && w.box.contains(it.box.centerX(), it.box.centerY()) }
+            val words = drawn.map { VScreenOcr.norm(it.text) }.filter { it.length > 1 }
+            if (words.size != 1) return@run null
+            a11y.filter { c -> c !== w && c.kind == ElKind.TEXT && !c.editable && VScreenOcr.norm(c.text) == words[0] && Rect.intersects(w.box, c.box) }.singleOrNull()
+        } ?: continue
+        dropped += w
+        if (w.clickable) tappable += one
+        items.filter { it !in usedOcr && w.box.contains(it.box.centerX(), it.box.centerY()) && VScreenOcr.norm(it.text).length <= 1 }.forEach { usedOcr += it }
+    }
+    for (a0 in a11y) {
+        if (a0 in dropped) continue
+        val a = if (a0 in tappable && !a0.clickable) a0.copy(clickable = true) else a0
         if (!a.placeholder && DIGIT.containsMatchIn(a.text) && a.text.length <= 24) {
             val drawn = items.filter { Rect(a.box).apply { inset(-8, -8) }.contains(it.box.centerX(), it.box.centerY()) && DIGIT.containsMatchIn(it.text) }
             val drawnText = drawn.joinToString(" ") { it.text.trim() }
@@ -176,13 +243,42 @@ internal fun mergeElements(d: VScreenDisplay, a11y: List<El>, ocr: List<VScreenO
                 continue
             }
         }
+        // 1.3: a wordless tappable element (an icon button, a tile) with words drawn inside it is named by them: one
+        // entry, not "(no text ViewGroup)" plus the words beside it.
+        if (a.kind == ElKind.NO_TEXT) {
+            val inner = items.filter { it !in usedOcr && a.box.contains(it.box.centerX(), it.box.centerY()) }
+            if (inner.isNotEmpty()) {
+                usedOcr += inner
+                val row = maxOf(16, d.height / 120)
+                val words = inner.sortedWith(compareBy({ it.box.centerY() / row }, { it.box.centerX() })).joinToString(" · ") { it.text.replace('\n', ' ').trim() }
+                val w = tidy(words)
+                out += a.copy(text = if (w.first == ElKind.TEXT) w.second else "", kind = w.first, hint = if (w.first == ElKind.LINK) w.second else null)
+                continue
+            }
+        }
         out += a
     }
     for (it in items) {
         if (it in usedOcr) continue
         val t = it.text.replace('\n', ' ').trim()
         val nt = VScreenOcr.norm(t)
-        val said = out.any { a -> a.fromA11y && !a.placeholder && Rect.intersects(a.box, it.box) && VScreenOcr.norm(a.text).let { l -> l.isNotEmpty() && (l.contains(nt) || nt.contains(l)) } }
+        // 1.3: one source per place. Where the app's own element has words (its text, its description, or a hidden
+        // link), those are the element: the OCR reading of the same place is not listed again. Before, both were listed
+        // ("推荐,7之2,标签" and "推荐"), icons were named by what OCR made of them ("Q", "O") next to their real names,
+        // and an address bar hidden as a link was read out in clear by OCR.
+        // 1.4.0-beta3: an element with words covers only the words it SAYS (or a lone glyph inside it: an icon OCR
+        // misnamed). beta2 let any element up to a quarter of the screen swallow every word inside its box, so a card
+        // whose node says "荣耀字体" hid the "HONOR Sans" drawn under it: the word was on the picture and in no list.
+        // A hidden link still covers everything inside it.
+        // 1.4.0-beta5 (test: a tab bar's 计时器 listed twice, 37 px apart): the element's box and the drawn words need not
+        // share a centre (a tab's node is its label, OCR's box takes the glyph spacing differently). The same words in
+        // boxes that overlap are one place.
+        val said = out.any { a ->
+            a.fromA11y && (a.kind == ElKind.TEXT || a.kind == ElKind.LINK) && (
+                Rect(a.box).apply { inset(-6, -6) }.contains(it.box.centerX(), it.box.centerY()) &&
+                    (a.kind == ElKind.LINK || nt.length <= 1 || saysWord(VScreenOcr.norm(a.text), nt)) ||
+                nt.isNotEmpty() && VScreenOcr.norm(a.text) == nt && Rect.intersects(Rect(a.box).apply { inset(-12, -12) }, it.box))
+        }
         if (!said) { val w = tidy(t); out += El(0, if (w.first == ElKind.TEXT) w.second else "", Rect(it.box), false, kind = w.first, hint = if (w.first == ElKind.LINK) w.second else null) }
     }
     val row = maxOf(16, d.height / 120)
@@ -190,7 +286,9 @@ internal fun mergeElements(d: VScreenDisplay, a11y: List<El>, ocr: List<VScreenO
 }
 /** One look at the screen: a frame, the OCR words of exactly that frame, the elements, the foreground activity. */
 internal class Snap(val frame: Bitmap?, val version: Long, val items: List<VScreenOcr.Item>?, val els: List<El>,
-                    val activity: String?, val ocrReused: Boolean)
+                    val activity: String?, val ocrReused: Boolean, val mask: com.kilon.agentvscreen.core.Mask? = null,
+                    /** Set when the words could not be read (both engines failed) or the accurate one fell back: said in 【注意】. */
+                    val ocrProblem: String? = null, val ocrFallback: String? = null)
 
 private val snapPool = java.util.concurrent.Executors.newCachedThreadPool { r -> Thread(r, "vscreen-snap").apply { isDaemon = true } }
 
@@ -214,6 +312,8 @@ internal fun VScreenOffloadHandler.snapshot(d: VScreenDisplay, freshMs: Long = 1
         val a11yF = snapPool.submit<List<El>> { runCatching { a11yRaw(d) }.getOrDefault(emptyList()) }
         val actF = snapPool.submit<String?> { runCatching { VScreenShell.topActivity(d.displayId) }.getOrNull() }
         var reused = false
+        var problem: String? = null
+        var fellBack: String? = null
         val items: List<VScreenOcr.Item>? = if (fv == null) null else {
             VScreenPerception.readingFor(d.displayId, fv.first, fv.second)?.let { reused = true; it.items }
                 ?: run {
@@ -221,7 +321,9 @@ internal fun VScreenOffloadHandler.snapshot(d: VScreenDisplay, freshMs: Long = 1
                     // slow) OCR instead of doing work nobody waits for.
                     if (Call.current()?.cancelled == true) throw BackgroundOperation.ActionError("CANCELLED", tr("调用方断开或取消了，OCR 没有做", "The caller disconnected or cancelled; OCR was not run"))
                     runCatching { VScreenOcr.recognize(d.displayId, fv.first, fv.second, accurate = VScreenOcr.accurateEnabled()) }
-                        .getOrNull()?.takeIf { it.error == null }?.let { r ->
+                        .getOrElse { t -> VScreenOcr.Result(emptyList(), d.displayId, fv.second, 0L, "${t.javaClass.simpleName}: ${t.message}") }
+                        .also { r -> problem = r.error?.let { e -> VScreenOcr.downLine(e) }; fellBack = r.fallback }
+                        .takeIf { it.error == null }?.let { r ->
                             // r45: ...and again after it — a reading nobody waits for is not offered to perception.
                             if (Call.current()?.cancelled == true) throw BackgroundOperation.ActionError("CANCELLED", tr("调用方断开或取消了，读到的文字没有用", "The caller disconnected or cancelled; the reading was discarded"))
                             val a11yTexts = runCatching { a11yF.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList()).map { it.label }
@@ -233,15 +335,18 @@ internal fun VScreenOffloadHandler.snapshot(d: VScreenDisplay, freshMs: Long = 1
         val raw = runCatching { a11yF.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList())
         val act = runCatching { actF.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()
         val after = d.latestWithVersion()
-        if (attempt == 0 && fv != null && after != null && after.second != fv.second && !samePicture(fv.first, after.first)) { attempt++; continue }
-        return Snap(fv?.first, fv?.second ?: -1L, items, mergeElements(d, raw, items), act, reused)
+        val mask = VScreenPerception.mask(d.displayId)
+        if (attempt == 0 && fv != null && after != null && after.second != fv.second && !samePicture(fv.first, after.first, mask)) { attempt++; continue }
+        return Snap(fv?.first, fv?.second ?: -1L, items, mergeElements(d, raw, items?.let { VScreenPerception.still(it, mask) }), act, reused, mask,
+            problem ?: VScreenOcr.downLine(null), fellBack)
     }
 }
 
-private fun samePicture(a: Bitmap, b: Bitmap): Boolean {
+private fun samePicture(a: Bitmap, b: Bitmap, mask: com.kilon.agentvscreen.core.Mask? = null): Boolean {
     if (a === b) return true
     val x = VScreenPerception.small(a); val y = VScreenPerception.small(b)
-    return try { x.width == y.width && x.height == y.height && com.kilon.agentvscreen.core.VPixels.regionDiff(x, y, Rect(0, 0, x.width, x.height)) in 0.0..0.002 }
+    // 1.3: a playing area (video, carousel) does not make the page "still changing": it is not read again for it.
+    return try { com.kilon.agentvscreen.core.Change.same(x, y, com.kilon.agentvscreen.core.Change.Level.SETTLED, skip = mask?.rectsIn(x.width, x.height).orEmpty()) }
     finally { x.recycle(); y.recycle() }
 }
 
@@ -265,10 +370,25 @@ internal fun El.line(): String {
  * What happened on [d] between [from] and [to] (epoch ms), from the perception readings and the recording track:
  * words that appeared, went, or came and went; spans when the picture changed, where and how much.
  */
-internal fun sinceHeader(from: Long, to: Long, actionMs: Long): String {
-    val span = ((to - from) / 100) / 10.0
-    return if (actionMs > 0 && to - from > actionMs + 300) tr("上次返回到现在 ${span}s（其中这段动作 ${(actionMs / 100) / 10.0}s，之前 ${((to - from - actionMs) / 100) / 10.0}s 是你在思考或做别的）", "${span}s since the last reply (this segment's actions ${(actionMs / 100) / 10.0}s; the ${((to - from - actionMs) / 100) / 10.0}s before were you thinking or doing other things)")
-        else tr("这段 ${span}s", "this segment ${span}s")
+internal fun sinceHeader(from: Long, to: Long, actionMs: Long, receivedAt: Long = 0L): String {
+    fun s(ms: Long) = "${(maxOf(0L, ms) / 100) / 10.0}s"
+    val span = s(to - from)
+    // 1.3: time is split by where it was spent. Before, everything that was not this segment's actions was called
+    // "you thinking", including the phone building the last reply and the transfer of the reply and its picture.
+    if (receivedAt <= from || receivedAt > to) return if (actionMs > 0 && to - from > actionMs + 300) tr("上次返回到现在 $span（其中这段动作 ${s(actionMs)}）", "$span since the last reply (this segment's actions ${s(actionMs)})") else tr("这段 $span", "this segment $span")
+    val outside = receivedAt - from
+    val here = to - receivedAt
+    return tr("上次返回到现在 $span：手机之外 ${s(outside)}（回复和图片在路上、你在看和思考），这条命令到手机后 ${s(here)}（其中动作和等待 ${s(actionMs)}）",
+        "$span since the last reply: ${s(outside)} outside the phone (the reply and picture in transit, you reading and thinking), ${s(here)} since this command reached the phone (actions and waits ${s(actionMs)})")
+}
+
+/** 1.3: what the phone spent on this reply, by part (ms), said at the end of 【做了什么】 and in data.timing. */
+internal class Timing(val received: Long, val actionMs: Long) {
+    var lookMs = 0L; var trackMs = 0L; var pictureMs = 0L
+    fun line(total: Long): String = tr("手机端这条用了 ${sec(total)}：动作和等待 ${sec(actionMs)}，读屏 ${sec(lookMs)}，这段时间的录像 ${sec(trackMs)}，出图 ${sec(pictureMs)}",
+        "on the phone this took ${sec(total)}: actions and waits ${sec(actionMs)}, reading the screen ${sec(lookMs)}, the meanwhile track ${sec(trackMs)}, the picture ${sec(pictureMs)}")
+    fun json(total: Long) = org.json.JSONObject().put("phone_ms", total).put("action_ms", actionMs).put("look_ms", lookMs).put("track_ms", trackMs).put("picture_ms", pictureMs)
+    private fun sec(ms: Long) = "${(maxOf(0L, ms) / 100) / 10.0}s"
 }
 
 /** Words that appeared, went, or came and went between [from] and [to], from the perception readings. */
@@ -278,10 +398,14 @@ internal fun wordFacts(d: VScreenDisplay, from: Long, to: Long): List<String> {
     if (rs.size >= 2) {
         val then = rs.first().words; val now = rs.last().words
         val thenN = then.map { VScreenOcr.norm(it) }.toSet(); val nowN = now.map { VScreenOcr.norm(it) }.toSet()
-        val appeared = now.filter { VScreenOcr.norm(it) !in thenN }
-        val gone = then.filter { VScreenOcr.norm(it) !in nowN }
+        // 1.3.0: a reading taken while text was still drawing or sliding in gives pieces of it ("Auracast 音频广",
+        // "频广", "o"). A piece of a word that is on the screen now is not a word of its own: it did not appear
+        // next to the whole word, and it did not go away.
+        fun partOf(k: String, of: Collection<String>) = k.isNotEmpty() && of.any { it.length > k.length && it.contains(k) }
+        val appeared = now.filter { val k = VScreenOcr.norm(it); k !in thenN && !partOf(k, nowN) }
+        val gone = then.filter { val k = VScreenOcr.norm(it); k !in nowN && !partOf(k, nowN) }
         val between = LinkedHashMap<String, String>()
-        for (r in rs.drop(1).dropLast(1)) for (w in r.words) { val k = VScreenOcr.norm(w); if (k !in thenN && k !in nowN) between.putIfAbsent(k, w) }
+        for (r in rs.drop(1).dropLast(1)) for (w in r.words) { val k = VScreenOcr.norm(w); if (k !in thenN && k !in nowN && !partOf(k, nowN) && !partOf(k, thenN)) between.putIfAbsent(k, w) }
         if (appeared.isNotEmpty()) lines += tr("出现了：", "appeared: ") + list(appeared, 20)
         if (gone.isNotEmpty()) lines += tr("不见了：", "disappeared: ") + list(gone, 20)
         if (between.isNotEmpty()) lines += tr("中途出现过又消失：", "appeared and disappeared meanwhile: ") + list(between.values.toList(), 12)
@@ -292,11 +416,14 @@ internal fun wordFacts(d: VScreenDisplay, from: Long, to: Long): List<String> {
 /** Where and how long the picture changed between [from] and [to], from the recording track. (lines, changed) */
 internal fun pictureFacts(d: VScreenDisplay, from: Long, to: Long): Pair<List<String>, Boolean> {
     val lines = ArrayList<String>()
+    // 1.3: an area that keeps playing (video, carousel) is said once and left out of the changes below.
+    val mask = VScreenPerception.mask(d.displayId)
+    mask?.let { lines += tr("一直在动的区域（视频、轮播或动画，里面的字不列出，稳定判断不算它）：${it.line(true)}", "areas that keep moving (video, carousel or animation; their words are not listed, settling ignores them): ${it.line(false)}") }
     val frames = VScreenRecorder.frames(d.displayId, from, to)
     if (frames.isEmpty()) return lines to false
     val base = VScreenRecorder.frameAt(d.displayId, from)
     val sample = (listOfNotNull(base?.takeIf { it.atMs < (frames.firstOrNull()?.atMs ?: 0L) }) + frames.let { fs ->
-        if (fs.size <= 40) fs else (0 until 40).map { fs[it * (fs.size - 1) / 39] }.distinct()
+        if (fs.size <= 24) fs else (0 until 24).map { fs[it * (fs.size - 1) / 23] }.distinct()
     })
     val pics = sample.mapNotNull { f -> VScreenRecorder.decode(f, 160)?.let { f.atMs to it } }
     val (fw, fh) = VScreenRecorder.frameSize(d.displayId) ?: (d.width to d.height)
@@ -305,7 +432,7 @@ internal fun pictureFacts(d: VScreenDisplay, from: Long, to: Long): Pair<List<St
     try {
         for ((a, b) in pics.zipWithNext()) {
             val rows = VScreenActivity.rowsFor(a.second.width, a.second.height)
-            val c = VScreenActivity.cells(a.second, b.second, VScreenActivity.COLS, rows) ?: continue
+            val c = VScreenActivity.cells(a.second, b.second, VScreenActivity.COLS, rows)?.let { cc -> mask?.takeIf { it.cols == VScreenActivity.COLS && it.rows == rows }?.minus(cc) ?: cc } ?: continue
             val share = VScreenActivity.share(c)
             if (share <= 0.0) continue
             val bb = VScreenActivity.bbox(c, VScreenActivity.COLS, rows, fw, fh) ?: continue
@@ -316,7 +443,7 @@ internal fun pictureFacts(d: VScreenDisplay, from: Long, to: Long): Pair<List<St
         if (spans.isEmpty()) return lines to false
         val firstLast = if (pics.size >= 2) {
             val a = pics.first().second; val b = pics.last().second
-            VScreenActivity.cells(a, b, VScreenActivity.COLS, VScreenActivity.rowsFor(a.width, a.height))?.let { c ->
+            VScreenActivity.cells(a, b, VScreenActivity.COLS, VScreenActivity.rowsFor(a.width, a.height))?.let { c0 -> mask?.takeIf { it.cols == VScreenActivity.COLS && it.rows == VScreenActivity.rowsFor(a.width, a.height) }?.minus(c0) ?: c0 }?.let { c ->
                 VScreenActivity.share(c) to VScreenActivity.bbox(c, VScreenActivity.COLS, VScreenActivity.rowsFor(a.width, a.height), fw, fh)
             }
         } else null
@@ -329,7 +456,9 @@ internal fun pictureFacts(d: VScreenDisplay, from: Long, to: Long): Pair<List<St
             lines += if (share <= 0.0) tr("开头和现在的画面一样（中间动过又回去了）", "the start and now look the same (it moved and came back)")
                 else tr("开头和现在相比：${(share * 100).roundToInt()}% 的格子不同", "start vs now: ${(share * 100).roundToInt()}% of cells differ") + (bb?.let { " [${Report.box(it)}]" } ?: "")
         }
-        return lines to true
+        // 1.4.0-beta6 (test: "start and now look the same" yet picture_changed and a picture attached): the picture the
+        // agent had is the start; when now looks the same, it has nothing new to see.
+        return lines to (firstLast?.let { it.first > 0.0 } ?: true)
     } finally { pics.forEach { it.second.recycle() } }
 }
 
@@ -345,17 +474,16 @@ private fun list(ws: List<String>, max: Int): String =
  * ago, the actions done before it drawn as a red dot / line). Saved in the chat's attachments and offered inline.
  */
 internal fun VScreenOffloadHandler.picture(sid: String, d: VScreenDisplay, frame: Bitmap, since: Since?, tag: String,
-                                           cells0: List<Pair<Long, Bitmap>>? = null): String? = runCatching {
-    val k = minOf(1.0, Report.NOW_SIDE.toDouble() / maxOf(frame.width, frame.height))
+                                           cells0: List<Cell>? = null, detail: Detail = Detail.NORMAL, marks: Boolean = true): String? = runCatching {
+    val k = minOf(1.0, detail.nowSide.toDouble() / maxOf(frame.width, frame.height))
     val nw = (frame.width * k).roundToInt().coerceAtLeast(1); val nh = (frame.height * k).roundToInt().coerceAtLeast(1)
     val margin = 30; val title = 26
     // The sheet.
-    val cells: List<Pair<Long, Bitmap>> = cells0 ?: if (since?.changed == true) pickTrack(d.displayId, since.from, since.to, Report.MAX_CELLS) else emptyList()
-    val marks = if (cells.isNotEmpty()) VScreenRecorder.marks(d.displayId, since!!.from - 1, since.to).filter { it.kind == "action" } else emptyList()
+    val cells: List<Cell> = cells0 ?: if (since?.changed == true) pickCells(d.displayId, since.from, since.to, Report.MAX_CELLS, Report.CELL_SIDE).cells else emptyList()
     val (fw, fh) = VScreenRecorder.frameSize(d.displayId) ?: (d.width to d.height)
     val landscape = frame.width > frame.height
-    val cw = cells.maxOfOrNull { it.second.width } ?: 0; val ch = cells.maxOfOrNull { it.second.height } ?: 0
-    val cap = 22; val pad = 6
+    val cw = cells.maxOfOrNull { it.bmp.width } ?: 0; val ch = cells.maxOfOrNull { it.bmp.height } ?: 0
+    val cap = CAPTION; val pad = CELL_PAD
     val cols = when { cells.isEmpty() -> 0; landscape -> minOf(4, cells.size); cells.size <= 4 -> 1; else -> 2 }
     val rows = if (cols == 0) 0 else (cells.size + cols - 1) / cols
     val sheetW = if (cols == 0) 0 else cols * (cw + pad) + pad
@@ -369,9 +497,22 @@ internal fun VScreenOffloadHandler.picture(sid: String, d: VScreenDisplay, frame
     val tick = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 15f; color = Color.rgb(30, 30, 160) }
     val line = Paint().apply { color = Color.rgb(30, 30, 160); strokeWidth = 1f }
     val faint = Paint().apply { color = Color.argb(70, 30, 30, 160); strokeWidth = 1f }
-    c.drawText(tr("现在（边上是副屏坐标）", "Now (screen coordinates on the edges)"), margin.toFloat(), 20f, head)
+    c.drawText(if (marks) tr("现在（边上是副屏坐标）", "Now (screen coordinates on the edges)") else tr("现在", "Now"), margin.toFloat(), 20f, head)
     val ox = margin; val oy = title + margin
     c.drawBitmap(frame, null, Rect(ox, oy, ox + nw, oy + nh), Paint(Paint.FILTER_BITMAP_FLAG))
+    if (marks) drawRuler(c, d, ox, oy, nw, nh, k, tick, line, faint)
+    if (cells.isNotEmpty()) {
+        val sx = if (landscape) 0 else nowW; val sy = if (landscape) nowH else 0
+
+        c.drawText(tr("这段时间（${Report.ago(since!!.from, since.to)} 到现在；圈=动作的位置，画在动作前那张上）", "Meanwhile (${Report.ago(since!!.from, since.to)} to now; ring = where an action touched, on the frame before it)"), (sx + pad).toFloat(), (sy + 20).toFloat(), head)
+        drawCells(c, sx, sy + title, cells, cols, cw, ch, fw, fh, since.to)
+    }
+    cells.forEach { it.bmp.recycle() }
+    savePic(sid, out, tag, detail.use, sent = true).also { out.recycle() }
+}.getOrNull()
+
+/** The coordinate ruler on a picture of the whole screen: ticks every 100 screen px, numbers and faint lines every 200 (500 on big screens). */
+private fun drawRuler(c: Canvas, d: VScreenDisplay, ox: Int, oy: Int, nw: Int, nh: Int, k: Double, tick: Paint, line: Paint, faint: Paint) {
     // Ticks every 100 screen px, numbers every 200 (every 500 on big screens), faint lines across every 200/500.
     val stepLabel = if (maxOf(d.width, d.height) > 2600) 500 else 200
     var v = 0
@@ -391,56 +532,10 @@ internal fun VScreenOffloadHandler.picture(sid: String, d: VScreenDisplay, frame
         }
         v += 100
     }
-    if (cells.isNotEmpty()) {
-        val sx = if (landscape) 0 else nowW; val sy = if (landscape) nowH else 0
-        c.drawText(tr("这段时间（${Report.ago(since!!.from, since.to)} 到现在，红点=点击 红线=拖动）", "Meanwhile (${Report.ago(since!!.from, since.to)} to now; red dot = tap, red line = drag)"), (sx + pad).toFloat(), (sy + 20).toFloat(), head)
-        val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 15f; color = Color.BLACK }
-        val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 30, 60); style = Paint.Style.STROKE; strokeWidth = 3f }
-        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(150, 255, 30, 60) }
-        var prevT = Long.MIN_VALUE
-        cells.forEachIndexed { i, (t, b) ->
-            val x = sx + pad + (i % cols) * (cw + pad); val y = sy + title + pad + (i / cols) * (ch + cap + pad)
-            c.drawBitmap(b, null, Rect(x, y, x + b.width, y + b.height), null)
-            val kx = b.width.toFloat() / maxOf(1, fw); val ky = b.height.toFloat() / maxOf(1, fh)
-            val here = marks.filter { it.atMs > prevT && it.atMs <= t }
-            for (m in here) {
-                val pts = m.pts.map { (x + it[0] * kx) to (y + it[1] * ky) }
-                if (pts.size == 1) { c.drawCircle(pts[0].first, pts[0].second, 7f, fill); c.drawCircle(pts[0].first, pts[0].second, 11f, dot) }
-                else for ((a, bb) in pts.zipWithNext()) c.drawLine(a.first, a.second, bb.first, bb.second, dot)
-            }
-            c.drawText("${i + 1}  ${Report.ago(t, since.to)}" + if (here.isNotEmpty()) "  ${here.joinToString(" ") { it.label.take(14) }}".take(34) else "",
-                (x + 2).toFloat(), (y + ch + 16).toFloat(), tp)
-            prevT = t
-        }
-    }
-    cells.forEach { it.second.recycle() }
-    savePic(sid, out, tag).also { out.recycle() }
-}.getOrNull()
+}
 
 /** Save [bmp] as a JPEG in the shot store and return its reference (the API layer turns it into a URL, a local file or an inline image). */
-internal fun VScreenOffloadHandler.savePic(sid: String, bmp: Bitmap, tag: String): String? = ShotStore.save(context, bmp, tag)
-
-/**
- * Frames from the track for a sheet: the one showing at [from], the first after every action, then evenly spread,
- * at most [max] (caller recycles).
- */
-internal fun pickTrack(displayId: Int, from: Long, to: Long, max: Int, maxSide: Int = Report.CELL_SIDE): List<Pair<Long, Bitmap>> {
-    val all = VScreenRecorder.frames(displayId, from - 120_000L, to)
-    if (all.isEmpty()) return emptyList()
-    val times = all.map { it.atMs }
-    val acts = VScreenRecorder.marks(displayId, from, to).filter { it.kind == "action" }.map { it.atMs }
-    val first = times.indices.lastOrNull { times[it] <= from } ?: 0
-    val inside = times.indices.filter { times[it] in (from + 1)..to }
-    val chosen = sortedSetOf(first)
-    for (a in acts) inside.firstOrNull { times[it] >= a }?.let { if (chosen.size < max) chosen += it }
-    val room = max - chosen.size
-    if (room > 0 && inside.isNotEmpty()) {
-        val rest = inside.filter { it !in chosen }
-        val spread = if (rest.size <= room) rest else (0 until room).map { kk -> rest[(kk * (rest.size - 1)) / maxOf(1, room - 1)] }
-        chosen.addAll(spread)
-    }
-    return chosen.toList().take(max).mapNotNull { i -> VScreenRecorder.decode(all[i], maxSide)?.let { all[i].atMs to it } }
-}
+internal fun VScreenOffloadHandler.savePic(sid: String, bmp: Bitmap, tag: String, use: com.kilon.agentvscreen.core.Pictures.Use = Detail.NORMAL.use, sent: Boolean = false): String? = ShotStore.save(context, bmp, tag, use, sent)
 
 // ── the four blocks ──────────────────────────────────────────────────
 
@@ -457,7 +552,14 @@ internal fun VScreenOffloadHandler.fourBlocks(sid: String, d: VScreenDisplay, li
     val now = System.currentTimeMillis()
     val last = synchronized(VScreenOffloadHandler.lastReturn) { VScreenOffloadHandler.lastReturn[sid] }
     val from = if (last != null && now - last <= 600_000L && last <= segmentStart) last else segmentStart
+    val received = Call.current()?.receivedAt ?: segmentStart
+    val timing = Timing(received, actionMs)
     fun finish(sb: StringBuilder, data: org.json.JSONObject, outcome0: String): NativeOffloadResult {
+        val total = System.currentTimeMillis() - received
+        val tl = timing.line(total)
+        val at = sb.indexOf(TIMING_MARK)
+        if (at >= 0) sb.replace(at, at + TIMING_MARK.length, tl + "\n")
+        data.put("timing", timing.json(total))
         sb.append("\n" + Blocks.notes + "\n")
         if (notes.isEmpty) sb.append(tr("无\n", "none\n")) else notes.list.forEach { sb.append("- ").append(it.line()).append('\n') }
         val ok = outcome0 == "done" || outcome0 == "stopped"
@@ -476,24 +578,45 @@ internal fun VScreenOffloadHandler.fourBlocks(sid: String, d: VScreenDisplay, li
         return finish(sb, org.json.JSONObject().put("screen", org.json.JSONObject.NULL), "interrupted")
     }
     // v0.5: the recording-track work (decoding frames for 【这段时间】 and the sheet) runs while the screen is read.
+    val tTrack = SystemClock.elapsedRealtime()
     val picF = REPORT_POOL.submit<Pair<List<String>, Boolean>>(com.kilon.agentvscreen.I18n.carry { runCatching { pictureFacts(d, from, now) }.getOrElse { listOf(tr("（读不到录屏：${it.message}）", "(recording unreadable: ${it.message})")) to false } })
-    val cellsF = REPORT_POOL.submit<List<Pair<Long, Bitmap>>> { runCatching { pickTrack(d.displayId, from, now, Report.MAX_CELLS) }.getOrDefault(emptyList()) }
+    val cellsF = REPORT_POOL.submit<Picked> { runCatching { pickCells(d.displayId, from, now, Report.MAX_CELLS, Report.CELL_SIDE) }.getOrDefault(Picked(emptyList(), 0, 0, 0)) }
+    val snapAt = SystemClock.elapsedRealtime()
     val snap = snapshot(d)
+    timing.lookMs = SystemClock.elapsedRealtime() - snapAt
     val (picLines, changed) = runCatching { picF.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList<String>() to false)
-    val cells = runCatching { cellsF.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(emptyList())
+    val picked = runCatching { cellsF.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrDefault(Picked(emptyList(), 0, 0, 0))
+    val cells = picked.cells
+    // 1.3 beta5: the sheet also comes when the picture did not change but the stretch touched the screen: a tap that
+    // hit nothing is exactly when the agent needs to see where it landed.
+    val touched = cells.any { c -> c.marks.any { it.pts.isNotEmpty() } }
+    timing.trackMs = maxOf(0L, SystemClock.elapsedRealtime() - tTrack - timing.lookMs)
     val words = wordFacts(d, from, System.currentTimeMillis())
-    val sinceLines = ArrayList<String>().apply { add(sinceHeader(from, now, actionMs)); addAll(words); addAll(picLines); if (size == 1) add(tr("文字和画面都没有明显变化（光标、细小动画这类小变动不算）", "no clear change in text or picture (cursors and tiny animations don't count)")) }
-    val since = Since(sinceLines, changed, from, now)
-    val els = numbered(sid, d, snap.els)
+    val sheet = changed || touched
+    val sinceLines = ArrayList<String>().apply { add(sinceHeader(from, now, actionMs, received)); addAll(words); addAll(picLines); if (size == 1) add(tr("文字和画面都没有明显变化（光标、细小动画这类小变动不算）", "no clear change in text or picture (cursors and tiny animations don't count)"))
+        if (sheet && cells.isNotEmpty()) add(run { val before = cells.count { it.marks.isNotEmpty() }
+            tr("拼图 ${cells.size} 张：${before} 张是动作之前（圈和编号是点的位置，拖动是线），其余是开头和动作之后的结果，每张下面写着是哪一种", "Sheet of ${cells.size}: $before before actions (ring and number where it touched, a line for a drag), the others the start and what actions led to; each says which under it") } +
+            (if (picked.leftOut > 0) tr("；前 ${picked.leftOut} 个动作没放进来", "; the first ${picked.leftOut} actions are not in it") else "") +
+            tr("。要更密、更长或别的时间段：vscreen frames（默认就是这段，--every 0.3s / --last 2m / --from 14:03:10）", ". Denser, longer or another stretch: vscreen frames (this stretch by default; --every 0.3s / --last 2m / --from 14:03:10)")) }
+    val since = Since(sinceLines, sheet, from, now)
+    synchronized(lastWindows) { lastWindows[sid] = longArrayOf(from, now) }
+    val els = numbered(sid, d, snap.els, snap.activity)
     val prev = synchronized(VScreenOffloadHandler.lastElements) { VScreenOffloadHandler.lastElements[sid] }
-    synchronized(VScreenOffloadHandler.lastElements) { VScreenOffloadHandler.lastElements[sid] = ElSet(d.generation, now, els) }
-    val shownCells = if (changed) cells else { cells.forEach { it.second.recycle() }; emptyList() }
-    val pic = snap.frame?.let { picture(sid, d, it, since, tag, shownCells) } ?: run { shownCells.forEach { it.second.recycle() }; null }
+    synchronized(VScreenOffloadHandler.lastElements) { VScreenOffloadHandler.lastElements[sid] = ElSet(d.generation, now, els, snap.activity, snapAt) }
+    val shownCells = if (sheet) cells else { cells.forEach { it.bmp.recycle() }; emptyList() }
+    val tPic = SystemClock.elapsedRealtime()
+    val pic = snap.frame?.let { picture(sid, d, it, since, tag, shownCells) } ?: run { shownCells.forEach { it.bmp.recycle() }; null }
+    timing.pictureMs = SystemClock.elapsedRealtime() - tPic
     if (snap.activity == null) notes.add("NO_APP", tr("副屏上没有应用（副屏没有桌面，back 回不到桌面）：launch <应用名> 打开一个", "No app on the screen (the screen has no launcher; back can't reach one): open one with launch <app name>"))
+    // 1.4.0-beta2: a reading that failed is said, never left as a short element list that looks complete.
+    com.kilon.agentvscreen.core.VScreenOwnership.takeNotes(sid).forEach { notes += it }
+    com.kilon.agentvscreen.core.VScreenDownscale.takeNote(d.displayId)?.let { notes += it }
+    snap.ocrProblem?.let { notes.add("OCR_DOWN", it) } ?: snap.ocrFallback?.let { notes += it }
     VScreenPerception.blankFor(d.displayId)?.let { ms -> notes += tr("画面已连续 ${(ms / 100) / 10.0} 秒是一整片纯色（黑屏/白屏）", "The picture has been one solid color for ${(ms / 100) / 10.0} s (black / white screen)") }
     val sb = StringBuilder()
     sb.append(Blocks.done + "\n")
     lines.forEach { sb.append(it).append('\n') }
+    sb.append(TIMING_MARK)
     sb.append("\n" + Blocks.meanwhile + "\n")
     since.lines.forEach { sb.append(it).append('\n') }
     sb.append("\n" + Blocks.now + " ").append(snap.activity ?: tr("（副屏上没有应用）", "(no app on the screen)")).append(tr("  副屏 ", "  screen ") + "${d.width}x${d.height}")
@@ -506,8 +629,9 @@ internal fun VScreenOffloadHandler.fourBlocks(sid: String, d: VScreenDisplay, li
         .put("generation", d.generation).put("image", pic ?: org.json.JSONObject.NULL).put("image_has_strip", since.changed && pic != null)
         .put("elements", org.json.JSONArray(els.take(Report.MAX_JSON_ELEMENTS).map { e -> e.json().also { o -> if (e !in shown) o.put("unchanged", true) } }))
         .put("elements_total", els.size)
-    return finish(sb, org.json.JSONObject().put("meanwhile", org.json.JSONArray(since.lines)).put("picture_changed", since.changed).put("screen", screen), outcome)
+    return finish(sb, org.json.JSONObject().put("meanwhile", org.json.JSONArray(since.lines)).put("picture_changed", changed || from != last).put("screen", screen), outcome)
 }
+private const val TIMING_MARK = "\u0000timing\u0000"
 private val REPORT_POOL = java.util.concurrent.Executors.newCachedThreadPool { r -> Thread(r, "vscreen-report").apply { isDaemon = true } }
 
 /** Same element as last time: same words, centre within 24 px. */
@@ -522,19 +646,30 @@ internal fun sameEl(a: El, b: El) = a.key == b.key && Math.abs(a.box.centerX() -
  * Before, a list that matched less than 60% of the last one (any scroll) was numbered from 1 again, and an agent that
  * used a number from two looks ago tapped a different element without being told.
  */
-internal fun numbered(sid: String, d: VScreenDisplay, els: List<El>): List<El> {
+/** 1.3: the app reported a new window, or the front activity is another one, since [set] was read. */
+internal fun pageChangedSince(d: VScreenDisplay, set: ElSet, activity: String?): Boolean =
+    (set.activity != null && activity != null && set.activity != activity) ||
+        (set.atElapsed > 0 && com.kilon.agentvscreen.host.VScreenAccessibilityService.pageChangedAt(d.displayId) > set.atElapsed)
+
+internal fun numbered(sid: String, d: VScreenDisplay, els: List<El>, activity: String? = null): List<El> {
     val key = "$sid@${d.generation}"
-    val prev = synchronized(VScreenOffloadHandler.lastElements) { VScreenOffloadHandler.lastElements[sid] }?.takeIf { it.generation == d.generation }?.list.orEmpty()
+    val prevSet = synchronized(VScreenOffloadHandler.lastElements) { VScreenOffloadHandler.lastElements[sid] }?.takeIf { it.generation == d.generation }
     val book = synchronized(Numbers) { Numbers.of(key) }
     if (els.isEmpty()) return els
+    // 1.3: numbers carry over only on the same page. A new window, another front activity, or a list that shares too
+    // little with the last one is a new page: every element gets a new number, and an old #N is STALE there.
+    val newPage = prevSet == null || pageChangedSince(d, prevSet, activity) || !samePage(prevSet.list, els)
+    val prev = if (newPage) emptyList() else prevSet!!.list
     val used = HashSet<Int>()
-    // Same words in the same place first; then same words that moved, when those words are unique in both lists.
+    // Same words in the same place first; then same words that moved with the whole list (a scroll).
     val match = arrayOfNulls<El>(els.size)
     els.forEachIndexed { i, e -> prev.firstOrNull { sameEl(it, e) && it.n !in used }?.let { match[i] = it; used += it.n } }
-    els.forEachIndexed { i, e ->
+    val shift = commonShift(prev, els)?.takeIf { it.third >= 2 }
+    if (shift != null) els.forEachIndexed { i, e ->
         if (match[i] != null || e.placeholder) return@forEachIndexed
         val inPrev = prev.filter { it.key == e.key && it.n !in used }
-        if (inPrev.size == 1 && els.count { it.key == e.key } == 1) { match[i] = inPrev[0]; used += inPrev[0].n }
+        if (inPrev.size == 1 && els.count { it.key == e.key } == 1 && Math.abs(e.box.centerX() - inPrev[0].box.centerX() - shift.first) <= 24 &&
+            Math.abs(e.box.centerY() - inPrev[0].box.centerY() - shift.second) <= 24) { match[i] = inPrev[0]; used += inPrev[0].n }
     }
     return synchronized(Numbers) {
         els.mapIndexed { i, e ->

@@ -2,7 +2,6 @@ package com.kilon.agentvscreen.core
 
 import android.graphics.Bitmap
 import android.graphics.Rect
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -12,7 +11,6 @@ import kotlin.math.roundToInt
  */
 object VScreenActivity {
     const val COLS = 24
-    private const val LUM_DIFF = 28
     private const val CELL_SHARE = 0.04
 
     fun rowsFor(w: Int, h: Int): Int = (COLS.toDouble() * h / maxOf(1, w)).roundToInt().coerceIn(6, 60)
@@ -37,7 +35,7 @@ object VScreenActivity {
                 val i = y * w + x
                 val c = cy * cols + (x.toLong() * cols / w).toInt().coerceIn(0, cols - 1)
                 all[c]++
-                if (abs(lum(pa[i]) - lum(pb[i])) > LUM_DIFF) hit[c]++
+                if (Change.differs(pa[i], pb[i])) hit[c]++
                 x += 2
             }
             y += 2
@@ -79,13 +77,6 @@ object VScreenActivity {
         }
         if (x1 < 0) return null
         return Rect(x0 * w / cols, y0 * h / rows, (x1 + 1) * w / cols, (y1 + 1) * h / rows)
-    }
-
-    /** Cells whose centre lies inside frame rect [r] of a [w]x[h] frame. */
-    fun cellsIn(r: Rect, cols: Int, rows: Int, w: Int, h: Int): BooleanArray = BooleanArray(cols * rows) { i ->
-        val cx = i % cols; val cy = i / cols
-        val x = (cx * w / cols + (cx + 1) * w / cols) / 2; val y = (cy * h / rows + (cy + 1) * h / rows) / 2
-        x >= r.left && x < r.right && y >= r.top && y < r.bottom
     }
 
     /** A flat frame (all white / all black / one colour): a transition, not a page. */

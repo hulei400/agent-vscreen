@@ -90,33 +90,6 @@ internal class ScreenSig private constructor(
         /** A few dozen changed pixels at 216px width: a digit, a caret, a toggle. */
         const val FINE_MIN = 0.0004
 
-        /**
-         * Fraction of pixels whose luminance changed noticeably between [a] and [b],
-         * compared at ~216px width. Small edits (typing, a calculator key, a check
-         * box) that the coarse signature calls "none" show up here. -1 = cannot tell.
-         */
-        fun fineDiff(a: Bitmap?, b: Bitmap?): Double {
-            if (a == null || b == null || a.isRecycled || b.isRecycled) return -1.0
-            if (a.width != b.width || a.height != b.height) return 1.0
-            return runCatching {
-                val w = 216
-                val h = (a.height.toLong() * w / a.width).toInt().coerceIn(1, 2000)
-                val sa = Bitmap.createScaledBitmap(a, w, h, true)
-                val sb = Bitmap.createScaledBitmap(b, w, h, true)
-                val pa = IntArray(w * h); val pb = IntArray(w * h)
-                sa.getPixels(pa, 0, w, 0, 0, w, h); sb.getPixels(pb, 0, w, 0, 0, w, h)
-                if (sa !== a) sa.recycle(); if (sb !== b) sb.recycle()
-                var n = 0
-                for (i in pa.indices) {
-                    val ca = pa[i]; val cb = pb[i]
-                    val la = (((ca shr 16) and 0xff) * 3 + ((ca shr 8) and 0xff) * 6 + (ca and 0xff)) / 10
-                    val lb = (((cb shr 16) and 0xff) * 3 + ((cb shr 8) and 0xff) * 6 + (cb and 0xff)) / 10
-                    if (abs(la - lb) > 28) n++
-                }
-                n.toDouble() / pa.size
-            }.getOrDefault(-1.0)
-        }
-
         fun of(bmp: Bitmap?): ScreenSig? {
             if (bmp == null || bmp.isRecycled) return null
             return runCatching {

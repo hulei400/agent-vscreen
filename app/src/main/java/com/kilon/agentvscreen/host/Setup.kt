@@ -68,8 +68,8 @@ object Setup {
         if (!Settings.canDrawOverlays(ctx)) step(tr("悬浮窗", "Floating window"), arrayOf("appops", "set", pkg, "SYSTEM_ALERT_WINDOW", "allow"))
         if (Build.VERSION.SDK_INT >= 33 && ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             step(tr("通知", "Notifications"), arrayOf("pm", "grant", pkg, Manifest.permission.POST_NOTIFICATIONS))
-        if (VScreenAccessibilityService.getInstance() == null) out += enableAccessibility(ctx).let { (ok, m) -> (if (ok) "✓ " else "✗ ") + m }
-        if (!VScreenPower.check(ctx).ok) out += VScreenPower.whitelist(ctx).let { (ok, m) -> (if (ok) "✓ " else "✗ ") + tr("后台白名单：$m", "Background exemption: $m") }
+        if (VScreenAccessibilityService.getInstance() == null) out += Heal.accessibility(ctx).let { (ok, m) -> (if (ok) "✓ " else "✗ ") + m }
+        if (!VScreenPower.check(ctx).ok) out += Heal.power(ctx).let { (ok, m) -> (if (ok) "✓ " else "✗ ") + tr("后台白名单：$m", "Background exemption: $m") }
         if (out.isEmpty()) out += tr("全部已就绪", "All set")
         AppLogger.info("Setup", out.joinToString(" | "))
         return out

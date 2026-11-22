@@ -31,6 +31,15 @@ object EventHub {
     private val queues = HashMap<String, ArrayDeque<JSONObject>>()
     /** Per session: the batch handed out by the last `events`, kept until the next one. */
     private val handed = HashMap<String, List<JSONObject>>()
+    /** When each [handed] batch went out. */
+    private val handedAt = HashMap<String, Long>()
+    /**
+     * 1.3.0-beta17: an unconfirmed batch is given again after a restart only while this young. A one-shot caller often
+     * never calls `events` again, so its last batch stayed "unconfirmed" for days and came back after every app
+     * restart or update, as noise in front of the event it was really waiting for. Older than this, the reply that
+     * carried it surely arrived (or nobody is there to want it). A batch already given again is never given a third time.
+     */
+    internal const val REDELIVER_MS = 10 * 60_000L
     private var seq = 0L
     @Volatile private var file: File? = null
 
@@ -42,15 +51,29 @@ object EventHub {
                 seq = o.optLong("seq")
                 val q = o.optJSONObject("queues") ?: JSONObject()
                 for (k in q.keys()) { val a = q.optJSONArray(k) ?: continue; queues[k] = ArrayDeque((0 until a.length()).mapNotNull { a.optJSONObject(it) }) }
+                // 1.3 beta2: a batch handed out before the restart and never confirmed is given again, marked as a
+                // repeat (same seq), so the caller can tell it already had it. Before, it came back looking new.
+                val h = o.optJSONObject("handed") ?: JSONObject()
+                val hAt = o.optJSONObject("handed_at") ?: JSONObject()
+                val now = System.currentTimeMillis()
+                for (k in h.keys()) {
+                    val a = h.optJSONArray(k) ?: continue
+                    val at = hAt.optLong(k, 0L).takeIf { it > 0 } ?: (0 until a.length()).maxOfOrNull { a.optJSONObject(it)?.optLong("at") ?: 0L } ?: 0L
+                    if (now - at > REDELIVER_MS) continue
+                    val back = (0 until a.length()).mapNotNull { a.optJSONObject(it) }.filter { !it.optBoolean("repeat") }.onEach { it.put("repeat", true) }
+                    val qq = queues.getOrPut(k) { ArrayDeque() }
+                    back.asReversed().forEach { qq.addFirst(it) }
+                }
             }
         }
     }
 
     private fun persist() = quiet("events-write") {
-        val q = JSONObject()
-        // The handed-out batch is still undelivered as far as the disk is concerned: after a restart it is given again.
-        (queues.keys + handed.keys).forEach { k -> q.put(k, JSONArray(handed[k].orEmpty() + queues[k].orEmpty())) }
-        file?.writeText(JSONObject().put("seq", seq).put("queues", q).toString())
+        val q = JSONObject(); val h = JSONObject(); val hAt = JSONObject()
+        // The handed-out batch is not confirmed yet: after a restart it is given again, as a repeat.
+        queues.keys.forEach { k -> q.put(k, JSONArray(queues[k].orEmpty())) }
+        handed.forEach { (k, v) -> h.put(k, JSONArray(v)); hAt.put(k, handedAt[k] ?: System.currentTimeMillis()) }
+        file?.writeText(JSONObject().put("seq", seq).put("queues", q).put("handed", h).put("handed_at", hAt).toString())
     }
 
     /** Returns a short note of where it went. */
@@ -77,7 +100,7 @@ object EventHub {
      */
     fun take(session: String, waitMs: Long, again: Boolean = false): List<JSONObject> = lock.withLock {
         if (again) return@withLock handed[session].orEmpty()
-        if (handed.remove(session) != null) persist()
+        if (handed.remove(session) != null) { handedAt.remove(session); persist() }
         // 1.2.0-beta2: wait in short slices and look whether the caller is still there. A waiter whose connection was
         // gone used to stay until its time ran out and then took the batch that arrived, to nowhere.
         val call = com.kilon.agentvscreen.cmd.Call.current()
@@ -90,19 +113,11 @@ object EventHub {
         if (call?.cancelled == true) return@withLock emptyList()
         val q = queues[session] ?: return@withLock emptyList()
         val out = q.toList(); q.clear()
-        if (out.isNotEmpty()) { handed[session] = out; persist() }
+        if (out.isNotEmpty()) { handed[session] = out; handedAt[session] = System.currentTimeMillis(); persist() }
         out
-    }
-
-    /** The reply carrying the last batch could not be written: the batch goes back to the front of the queue. */
-    fun undelivered(session: String) = lock.withLock {
-        val h = handed.remove(session) ?: return@withLock
-        val q = queues.getOrPut(session) { ArrayDeque() }
-        h.asReversed().forEach { q.addFirst(it) }
-        persist(); arrived.signalAll()
     }
 
     fun pending(session: String): Int = lock.withLock { queues[session]?.size ?: 0 }
 
-    internal fun resetForTest() = lock.withLock { queues.clear(); handed.clear(); seq = 0; file = null }
+    internal fun resetForTest() = lock.withLock { queues.clear(); handed.clear(); handedAt.clear(); seq = 0; file = null }
 }

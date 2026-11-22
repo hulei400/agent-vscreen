@@ -13,7 +13,6 @@ import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.kilon.agentvscreen.host.AppLogger
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
-import kotlin.math.hypot
 
 /**
  * [vscreen] On-device text layer for the background screen.
@@ -68,8 +67,26 @@ internal object VScreenOcr {
         val fallback: String? = null,
     )
 
-    private val recognizer by lazy { TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()) }
+    private val recognizer by lazy {
+        // 1.4.0-beta2: beta1 on a phone failed inside getClient (its component lookup returned null). Initialise ML Kit
+        // here with the app context, which is a no-op when its provider already did it.
+        BackgroundOperation.appContextOrNull()?.let { runCatching { com.google.mlkit.common.MlKit.initialize(it) } }
+        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+    }
     @Volatile private var cache: Result? = null
+    /** The fast engine's last failure, cleared by its next success: lets a reused or skipped reading still say OCR is down. */
+    @Volatile private var fastError: String? = null
+
+    /**
+     * 1.4.0-beta2: the line for 【注意】 when no engine could read the screen ([err], or the fast engine's last failure);
+     * null when reading works. Never silent: an element list from accessibility alone looks complete but is not.
+     */
+    fun downLine(err: String?): String? {
+        val e = err ?: fastError ?: return null
+        val acc = VScreenPaddleOcr.loadError()
+        return tr("文字识别不可用：" + (acc?.let { "PP-OCRv6 加载失败（${it.take(140)}）；" } ?: "") + "ML Kit 也失败（${e.take(140)}）。下面的元素只来自无障碍，画面上的字可能没列出来，以截图为准；vscreen diag 看详情，并告诉用户",
+            "Text recognition is unavailable: " + (acc?.let { "PP-OCRv6 failed to load (${it.take(140)}); " } ?: "") + "ML Kit failed too (${e.take(140)}). The elements below come from accessibility only and words on the picture may be missing; trust the screenshot, see vscreen diag, and tell the user")
+    }
     @Volatile private var accurateCache: Result? = null
 
     private fun reusable(c: Result?, displayId: Int, frame: Bitmap, version: Long): Boolean {
@@ -79,12 +96,11 @@ internal object VScreenOcr {
         val sig = ScreenSig.of(frame) ?: return false
         val old = c.sig ?: return false
         val ch = sig.compare(old)
-        return ch.kind == ScreenSig.Kind.NONE && ch.ratio < 0.004
+        return ch.kind == ScreenSig.Kind.NONE && ch.ratio < Change.Level.STILL.max
     }
 
     /** Average time of an accurate reading on this phone (0 = none yet). */
     @Volatile private var accurateMs = 0L
-
 
     /** Whether [recognize] with accurate = true will try PP-OCRv6 now. */
     fun accurateEnabled(): Boolean {
@@ -92,10 +108,37 @@ internal object VScreenOcr {
         return BackgroundOperation.state.value.accurateOcr && VScreenPaddleOcr.available(ctx)
     }
 
+    /**
+     * 1.4.0-beta2: both engines read the self-test picture once, with this phone's runtimes. Run when the service
+     * starts (so a broken engine is known before an agent's first look) and by `vscreen diag`. One line per engine.
+     */
+    @Volatile var selfTestReport: String? = null; private set
+    fun selfTest(ctx: android.content.Context): String {
+        val lines = ArrayList<String>()
+        lines += try {
+            val (words, hit, ms) = VScreenPaddleOcr.selfTest(ctx)
+            "PP-OCRv6: ${if (hit.size == VScreenPaddleOcr.EXPECT.size) "ok" else "WRONG"} ${hit.size}/${VScreenPaddleOcr.EXPECT.size} expected words, ${words.size} lines, ${ms}ms" +
+                (VScreenPaddleOcr.optNote?.let { " [$it]" } ?: "")
+        } catch (t: Throwable) { "PP-OCRv6: FAILED ${t.javaClass.simpleName}: ${t.message?.take(240)}" }
+        lines += try {
+            val bmp = ctx.assets.open("vscreen-ocr/selftest.png").use { android.graphics.BitmapFactory.decodeStream(it) }
+            try {
+                val t0 = SystemClock.elapsedRealtime()
+                val text = Tasks.await(recognizer.process(InputImage.fromBitmap(bmp, 0)), 10, TimeUnit.SECONDS)
+                val words = text.textBlocks.flatMap { b -> b.lines.map { it.text } }
+                val hit = VScreenPaddleOcr.EXPECT.filter { w -> words.any { it.contains(w) } }
+                fastError = null
+                "ML Kit: ${if (hit.isNotEmpty()) "ok" else "WRONG"} ${hit.size}/${VScreenPaddleOcr.EXPECT.size} expected words, ${words.size} lines, ${SystemClock.elapsedRealtime() - t0}ms"
+            } finally { bmp.recycle() }
+        } catch (t: Throwable) { val c = t.cause ?: t; fastError = "${c.javaClass.simpleName}: ${c.message}"; "ML Kit: FAILED ${c.javaClass.simpleName}: ${c.message?.take(240)}" }
+        return lines.joinToString("\n").also { selfTestReport = it; AppLogger.info(TAG, "self-test\n$it") }
+    }
+
     /** Engines for status: what read / tap --text use, and what the fast paths use. */
-    fun engineInfo(): String = if (accurateEnabled()) tr("${VScreenPaddleOcr.ENGINE}；滚动等快速路径用 $ENGINE；后台感知（state 的 now.words）也用精确引擎", "${VScreenPaddleOcr.ENGINE}; fast paths such as scrolling use $ENGINE; background perception (now.words in state) uses the accurate engine too") +
+    fun engineInfo(): String = (if (accurateEnabled()) tr("${VScreenPaddleOcr.ENGINE}；滚动等快速路径用 $ENGINE；后台感知（state 的 now.words）也用精确引擎", "${VScreenPaddleOcr.ENGINE}; fast paths such as scrolling use $ENGINE; background perception (now.words in state) uses the accurate engine too") +
             (if (accurateMs > 0L) tr("（约 ${accurateMs}ms/次，慢时降低频率）", " (about ${accurateMs}ms each, less often when slow)") else "")
-        else ENGINE + (VScreenPaddleOcr.loadError()?.let { tr("（PP-OCRv6 加载失败：$it）", " (PP-OCRv6 failed to load: $it)") } ?: "")
+        else ENGINE + (VScreenPaddleOcr.loadError()?.let { tr("（PP-OCRv6 加载失败：$it）", " (PP-OCRv6 failed to load: $it)") } ?: "")) +
+        (selfTestReport?.takeIf { "FAILED" in it || "WRONG" in it }?.let { tr("；自检：", "; self-test: ") + it.replace("\n", "; ") } ?: "")
 
     /**
      * OCR of [frame] (version [version]) on display [displayId]. Never throws. Not on the main thread.
@@ -142,10 +185,6 @@ internal object VScreenOcr {
         return (inside + extra).sortedWith(compareBy<Item>({ it.box.top / 8 }, { it.box.left }))
     }
 
-    /** [readRegion] that also remembers where its short words are ([displayId] < 0: do not). */
-    fun readRegion(displayId: Int, full: List<Item>, frame: Bitmap, r: Rect): List<Item> =
-        readRegion(full, frame, r).also { if (displayId >= 0) remember(displayId, it) }
-
     /** OCR of [r0] alone: enlarged (small regions up to 3×) and set on a plain margin of its own edge colour. */
     fun readCrop(frame: Bitmap, r0: Rect): List<Item> {
         val r = Rect(r0)
@@ -180,20 +219,6 @@ internal object VScreenOcr {
         return (counts.maxByOrNull { it.value }?.key ?: 0xFFFFFF) or 0xFF000000.toInt()
     }
 
-    /** The first number in [items] read in order ("1,234", "-5", "3.5"), or null. */
-    fun firstNumber(items: List<Item>): Double? {
-        val txt = items.sortedWith(compareBy<Item>({ it.box.top / 8 }, { it.box.left })).joinToString(" ") { it.text }
-        val m = NUMBER.find(txt) ?: return null
-        // v48: a time (mm:ss, h:mm:ss, with hundredths) is one value, in seconds — not its leading "00".
-        if (m.groupValues[2].isNotEmpty()) {
-            val parts = listOf(m.groupValues[1], m.groupValues[2], m.groupValues[3]).filter { it.isNotEmpty() }.map { it.toDouble() }
-            val whole = parts.fold(0.0) { acc, p -> acc * 60 + p }
-            return whole + (m.groupValues[4].takeIf { it.isNotEmpty() }?.let { "0.$it".toDouble() } ?: 0.0)
-        }
-        return m.value.replace(",", "").replace("，", "").toDoubleOrNull()
-    }
-    private val NUMBER = Regex("(\\d{1,3})[:：](\\d{2})(?:[:：](\\d{2}))?(?:[.](\\d{1,3}))?|[-+]?\\d[\\d,，]*(?:\\.\\d+)?")
-
     private fun recognizeFast(displayId: Int, frame: Bitmap, version: Long): Result {
         val c = cache
         if (reusable(c, displayId, frame, version)) return c!!
@@ -203,19 +228,15 @@ internal object VScreenOcr {
             val items = ArrayList<Item>()
             for (block in text.textBlocks) for (line in block.lines) items += segment(line)
             items.sortWith(compareBy<Item>({ it.box.top / 8 }, { it.box.left }))
+            fastError = null
             Result(items, displayId, version, SystemClock.elapsedRealtime() - t0, null, ScreenSig.of(frame)).also { cache = it }
         } catch (t: Throwable) {
             val cause = t.cause ?: t
             AppLogger.warning(TAG, "OCR failed: ${cause.javaClass.simpleName}: ${cause.message}")
+            fastError = "${cause.javaClass.simpleName}: ${cause.message}"
             Result(emptyList(), displayId, version, SystemClock.elapsedRealtime() - t0,
                 "${cause.javaClass.simpleName}: ${cause.message}")
         }
-    }
-
-    /** Current OCR of [d]'s latest frame, or null when there is no frame yet. */
-    fun current(d: VScreenDisplay): Result? {
-        val (frame, version) = d.latestWithVersion() ?: return null
-        return recognize(d.displayId, frame, version)
     }
 
     // ── segmentation ──────────────────────────────────────────────────────
@@ -282,27 +303,6 @@ internal object VScreenOcr {
     // ── queries ───────────────────────────────────────────────────────────
 
     fun norm(s: String) = s.filterNot { it.isWhitespace() }.lowercase()
-
-    /**
-     * v45: where each short text was last read on a display (any reading: the screen's, a region's). A short HUD
-     * word ("II", "周二") is sometimes lost by the whole-screen pass; knowing where it was lets a check re-read just
-     * that spot enlarged instead of waiting for the next whole-screen reading.
-     */
-    private val seenBoxes = HashMap<Int, LinkedHashMap<String, Rect>>()
-
-    fun remember(displayId: Int, items: List<Item>) = synchronized(seenBoxes) {
-        val m = seenBoxes.getOrPut(displayId) {
-            object : LinkedHashMap<String, Rect>(64, 0.75f, true) { override fun removeEldestEntry(e: MutableMap.MutableEntry<String, Rect>?) = size > 300 }
-        }
-        for (it in items) { val k = norm(it.text); if (k.isNotEmpty() && k.length <= 8) m[k] = Rect(it.box) }
-    }
-
-    fun lastBox(displayId: Int, q: String): Rect? = synchronized(seenBoxes) {
-        val k = norm(q); val m = seenBoxes[displayId] ?: return null
-        m[k] ?: m.entries.firstOrNull { k.isNotEmpty() && it.key.contains(k) }?.value
-    }
-
-    fun forget(displayId: Int) = synchronized(seenBoxes) { seenBoxes.remove(displayId) }
 
     /** Box of the characters of [item] that spell [query] (normalised), or null. */
     private fun subBox(item: Item, query: String): Rect? {
@@ -430,17 +430,6 @@ internal object VScreenOcr {
         return t.length == 1 && !t[0].isDigit() && t[0].code < 0x2E80 && item.box.height() < 18
     }
 
-    /** The item under (x, y): containing box (12 px slack) first, else the nearest centre within 80 px. */
-    fun hitTest(items: List<Item>, x: Int, y: Int): Pair<Item, Int>? {
-        val slack = 12
-        items.filter { x >= it.box.left - slack && x <= it.box.right + slack && y >= it.box.top - slack && y <= it.box.bottom + slack }
-            .minByOrNull { it.box.width() * it.box.height() }
-            ?.let { return it to 0 }
-        return items.map { it to hypot((it.cx - x).toDouble(), (it.cy - y).toDouble()).toInt() }
-            .filter { it.second <= 80 }
-            .minByOrNull { it.second }
-    }
-
     /** Group items into visual rows (vertical centres within half a row height). */
     fun rows(items: List<Item>): List<Row> {
         val sorted = items.sortedBy { it.cy }
@@ -456,18 +445,6 @@ internal object VScreenOcr {
             rows += mutableListOf(it)
         }
         return rows.map { r -> Row(r.sortedBy { it.box.left }) }
-    }
-
-    /**
-     * Title guess: in the top 18% of the screen, the text with the largest
-     * characters (ties: closest to the horizontal centre). A search box hint
-     * is usually smaller than a real title, but this stays a guess.
-     */
-    fun titleGuess(items: List<Item>, width: Int, height: Int, exclude: (Item) -> Boolean = { false }): Pair<String?, List<String>> {
-        val top = items.filter { it.box.bottom <= height * 0.18 && it.box.width() <= width / 2 && !exclude(it) && titleLike(it.text) }
-        val best = top.maxWithOrNull(compareBy<Item>({ (it.glyphs.map { g -> g.box.height() }.maxOrNull() ?: it.box.height()) / 4 },
-            { -abs(it.cx - width / 2) }))
-        return best?.text to top.take(6).map { it.text }
     }
 
     /**

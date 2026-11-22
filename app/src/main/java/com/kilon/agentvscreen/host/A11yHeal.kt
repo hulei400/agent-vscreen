@@ -8,7 +8,7 @@ import android.os.SystemClock
 /**
  * Keeps the read-only accessibility service on after the user asked for it once (setup), the way android-vdisplay
  * does, with three guard rails:
- *  - append-only (Setup.enableAccessibility keeps every other service), at most once a minute;
+ *  - append-only (Heal.accessibility keeps every other service), at most once a minute;
  *  - when it goes off again shortly after we turned it back on, that is the user (or the ROM) saying no: we stop and
  *    the app says so, until the user runs setup again;
  *  - when the system blocks the write (MagicOS / HarmonyOS), we remember it and stop trying; the app shows the manual way.
@@ -58,7 +58,7 @@ object A11yHeal {
         if (lastTry != 0L && now - lastTry < MIN_GAP_MS) return
         lastTry = now
         Thread {
-            val (ok, msg) = runCatching { Setup.enableAccessibility(ctx) }.getOrElse { false to tr("无障碍：${it.message}", "Accessibility: ${it.message}") }
+            val (ok, msg) = runCatching { Heal.accessibility(ctx) }.getOrElse { false to tr("无障碍：${it.message}", "Accessibility: ${it.message}") }
             lastResult = msg
             if (ok) {
                 healedAt = SystemClock.elapsedRealtime()

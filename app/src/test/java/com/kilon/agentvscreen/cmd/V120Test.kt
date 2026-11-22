@@ -47,8 +47,8 @@ class V120Test {
     }
 
     @Test fun theReferenceDocIsGeneratedFromTheTables() {
-        // docs/REFERENCE.md is the command table and the code table, written out. When it is missing this writes it;
-        // otherwise it must match (delete the file and run the tests to regenerate after changing a table).
+        // docs/REFERENCE.md is the command table and the code table, written out. It must match; `./build.sh regen`
+        // (AVS_REGEN=1) rewrites it. A test never writes the source tree otherwise.
         val f = java.io.File("../docs/REFERENCE.md")
         if (f.parentFile?.isDirectory != true) return
         fun part(): String = "## " + com.kilon.agentvscreen.tr("命令", "Commands") + "\n\n" + CommandSpec.markdown() + "## " + com.kilon.agentvscreen.tr("结果代码", "Result codes") + "\n\n" + Codes.markdown() + "\n"
@@ -56,8 +56,8 @@ class V120Test {
         I18n.choice = I18n.Lang.EN; val en = part()
         I18n.choice = I18n.Lang.ZH
         val want = "# Agent-VScreen 命令与代码参考 / Command and code reference\n\n> 由代码里的命令表和代码表生成，不要手改。Generated from the command and code tables in the source; do not edit by hand.\n\n# 中文\n\n" + zh + "\n# English\n\n" + en
-        if (!f.isFile) f.writeText(want)
-        assertEquals("docs/REFERENCE.md is out of date: delete it and run the tests", want, f.readText())
+        if (System.getenv("AVS_REGEN") == "1") f.writeText(want)
+        assertEquals("docs/REFERENCE.md is out of date: ./build.sh regen rewrites it", want, f.readText())
     }
 
     // ── codes and typed results ─────────────────────────────────────────
@@ -110,7 +110,8 @@ class V120Test {
         assertEquals(setOf("look"), t.scopes)
         assertFalse("the secret is not stored", Tokens.list.value.any { text.substringAfterLast('_') in it.json().toString() })
         assertEquals(t.id, Tokens.byBearer(text)?.id)
-        assertNull(Tokens.byBearer(text.dropLast(1) + "x"))
+        val wrong = text.dropLast(1) + (if (text.last() == 'x') "y" else "x")
+        assertNull("$text / $wrong / ${Tokens.parse(wrong)} / ${Tokens.byBearer(wrong)?.id} ${Tokens.byBearer(wrong)?.key} ${Tokens.sha256(Tokens.parse(wrong).second)}", Tokens.byBearer(wrong))
         assertEquals(Tokens.MAIN, Tokens.byBearer(ApiConfig.token)?.id)
         assertEquals(setOf("look", "operate", "system"), Tokens.byId(Tokens.MAIN)!!.scopes)
         Tokens.trust(t.id, 30); assertTrue(Tokens.byId(t.id)!!.trusted)
@@ -164,7 +165,8 @@ class V120Test {
             // Every command it shows as `vscreen <word>` exists.
             Regex("`vscreen ([a-z]+)").findAll(g).map { it.groupValues[1] }.forEach { assertTrue("guide names unknown command $it", CommandSpec.of(it) != null || it in CommandSpec.TRANSPORT_WORDS) }
             assertTrue(AgentGuide.skill().startsWith("---\nname: agent-vscreen"))
-            assertTrue(AgentGuide.memory().length < 1500)
+            // The note carries one line per ability (Abilities); English runs about twice as long as Chinese.
+            AgentGuide.memory().length.let { n -> assertTrue("memory note is $n chars", n < (if (lang == I18n.Lang.ZH) 1700 else 3800)) }
         }
         I18n.choice = I18n.Lang.ZH
         assertTrue(AgentGuide.guide().contains("看 → 做 → 核对"))

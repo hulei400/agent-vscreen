@@ -35,12 +35,12 @@ import com.kilon.agentvscreen.core.BackgroundOperation
 /** Who has the background screen right now, as the user sees it (drives colours, buttons and words). */
 enum class Mode { ACTING, STANDBY, IDLE, TAKEOVER, STOPPED }
 
-fun modeOf(s: BackgroundOperation.State): Mode = when {
-    s.userStopped -> Mode.STOPPED
-    s.takeoverSessionId != null && s.takeoverSessionId == s.ownerSessionId -> Mode.TAKEOVER
-    s.operating -> Mode.ACTING
-    s.idle || s.powerSaving -> Mode.IDLE
-    else -> Mode.STANDBY
+/** 1.4.0-beta2: read from ScreenPhase (the one answer to "what is the screen in"), plus whether an action is running now. */
+fun modeOf(s: BackgroundOperation.State): Mode = when (com.kilon.agentvscreen.core.ScreenPhase.of(s, null)) {
+    com.kilon.agentvscreen.core.ScreenPhase.STOPPED -> Mode.STOPPED
+    com.kilon.agentvscreen.core.ScreenPhase.TAKEN_OVER -> Mode.TAKEOVER
+    com.kilon.agentvscreen.core.ScreenPhase.IDLE, com.kilon.agentvscreen.core.ScreenPhase.PARKED -> Mode.IDLE
+    else -> if (s.operating) Mode.ACTING else Mode.STANDBY
 }
 
 object Palette {
@@ -51,8 +51,12 @@ object Palette {
     val standby = Color(0xFF7CC8FF)
     val idle = Color(0xFF94A3B8)
     val takeover = Color(0xFF34D399)
+    /** An agent is waiting for the user's answer: orchid, in the brand's violet family (not standby blue, not the turning rainbow). */
+    val asking = Color(0xFFD67BFF)
     val stopped = Color(0xFFFF5A5F)
     val brandA = Color(0xFF6C5CE7)
+    /** 1.4: the seed of the whole miuix palette. */
+    val brand = Color(0xFF7B6CFF)
     val brandB = Color(0xFF00C2FF)
     val ink = Color(0xFF0E1220)
 
@@ -112,20 +116,35 @@ fun Modifier.glowBorder(mode: Mode, corner: Dp, width: Dp = 2.5.dp, pad: Dp = 6.
     }
 }
 
-/** The app's colours: brand violet → cyan, quiet surfaces. */
+/**
+ * The app's colours. 1.4: the pages are built with miuix; its palette is seeded from the brand violet (tonal spot,
+ * light and dark follow the system), so every surface, switch and button stays in the violet family. Material 3 is
+ * kept underneath with the same colours for the few pieces still drawn with it (the floating window's pages).
+ */
 @Composable
 fun AvsTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
-    val scheme: ColorScheme = if (dark) darkColorScheme(
-        primary = Color(0xFFA99DFF), onPrimary = Color(0xFF1B1446), primaryContainer = Color(0xFF2E2770), onPrimaryContainer = Color(0xFFE4DFFF),
-        secondary = Color(0xFF6FD8FF), tertiary = Palette.takeover,
-        background = Color(0xFF0E1018), surface = Color(0xFF0E1018), surfaceContainer = Color(0xFF181B26),
-        surfaceContainerHigh = Color(0xFF1F2330), surfaceContainerLow = Color(0xFF141722), outlineVariant = Color(0xFF2B3040),
-    ) else lightColorScheme(
-        primary = Color(0xFF5B4BDB), onPrimary = Color.White, primaryContainer = Color(0xFFE7E3FF), onPrimaryContainer = Color(0xFF1E1466),
-        secondary = Color(0xFF0091C2), tertiary = Color(0xFF0E9F6E),
-        background = Color(0xFFF6F7FB), surface = Color(0xFFF6F7FB), surfaceContainer = Color.White,
-        surfaceContainerHigh = Color(0xFFF0F1F7), surfaceContainerLow = Color(0xFFFAFBFE), outlineVariant = Color(0xFFE3E5EE),
-    )
-    MaterialTheme(colorScheme = scheme, content = content)
+    val controller = androidx.compose.runtime.remember {
+        top.yukonga.miuix.kmp.theme.ThemeController(
+            top.yukonga.miuix.kmp.theme.ColorSchemeMode.MonetSystem,
+            keyColor = Palette.brand,
+            paletteStyle = top.yukonga.miuix.kmp.theme.ThemePaletteStyle.TonalSpot,
+        )
+    }
+    top.yukonga.miuix.kmp.theme.MiuixTheme(controller = controller) {
+        val c = top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+        val dark = isSystemInDarkTheme()
+        val base = if (dark) darkColorScheme() else lightColorScheme()
+        val scheme: ColorScheme = base.copy(
+            primary = c.primary, onPrimary = c.onPrimary, primaryContainer = c.primaryContainer, onPrimaryContainer = c.onPrimaryContainer,
+            secondary = c.secondary, onSecondary = c.onSecondary, secondaryContainer = c.secondaryContainer, onSecondaryContainer = c.onSecondaryContainer,
+            tertiary = Palette.takeover, background = c.background, onBackground = c.onBackground,
+            surface = c.surface, onSurface = c.onSurface, surfaceVariant = c.surfaceVariant, onSurfaceVariant = c.onSurfaceVariantSummary,
+            surfaceContainer = c.surfaceContainer, surfaceContainerHigh = c.surfaceContainerHigh, surfaceContainerHighest = c.surfaceContainerHighest,
+            surfaceContainerLow = c.surface, outline = c.outline, outlineVariant = c.dividerLine, error = c.error, onError = c.onError,
+        )
+        // Squircle corners draw with a RuntimeShader, like the blur: off where hardware shaders are not available.
+        androidx.compose.runtime.CompositionLocalProvider(top.yukonga.miuix.kmp.squircle.LocalSquircleEnabled provides Glass.blurOk) {
+            MaterialTheme(colorScheme = scheme, content = content)
+        }
+    }
 }

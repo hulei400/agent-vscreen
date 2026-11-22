@@ -15,6 +15,8 @@
 #   VSCREEN_SHOTS    "none" = do not download pictures (the text keeps their URLs)
 #   VSCREEN_SHOT_KEEP how many downloaded pictures to keep (default 40; all are removed after done / release)
 #   VSCREEN_NO_UPDATE  set = this script never replaces itself when the app is updated
+#   VSCREEN_PROXY    a proxy to reach the phone through (e.g. socks5h://127.0.0.1:1055 for a userspace Tailscale);
+#                    without it a remote address follows the usual http_proxy / no_proxy variables
 
 CLI_VERSION="@@VERSION@@"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-vscreen"
@@ -30,8 +32,16 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "vscreen: «需要 curl（Termux: pkg install curl；Alpine: apk add curl；Debian: apt install curl）|needs curl (Termux: pkg install curl; Alpine: apk add curl; Debian: apt install curl)»" >&2; exit 3
 fi
 
-# The app is local (or on the tailnet): never route it through an http(s)_proxy set for the internet.
-c() { curl --noproxy '*' "$@"; }
+# 1.3: only the phone itself (127.0.0.1 / localhost) skips proxies. A remote phone is reached the way this machine
+# reaches anything (http_proxy / no_proxy), or through VSCREEN_PROXY; before, every proxy was ignored and callers that
+# can only get out through one (a cloud container, a company network) could not connect.
+PROXY="${VSCREEN_PROXY:-$(conf VSCREEN_PROXY)}"
+case "$URL" in
+  http://127.0.0.1:*|http://localhost:*|http://\[::1\]:*) c() { curl --noproxy '*' "$@"; } ;;
+  # 1.3 beta8: VSCREEN_PROXY wins over no_proxy (a container's no_proxy often lists 100.64.0.0/10, which made curl
+  # skip the proxy and fail at once).
+  *) if [ -n "$PROXY" ]; then c() { curl --noproxy '' --proxy "$PROXY" "$@"; }; else c() { curl "$@"; }; fi ;;
+esac
 
 # ── signing ──────────────────────────────────────────────────────────────────────────────────────────────────────
 # K = sha256hex(token secret). A request carries the token's id, the time, a random nonce and
@@ -48,22 +58,44 @@ esac
 [ -z "$NOSIGN" ] && K=$(printf '%s' "$SECRET" | sha)
 hex() { od -An -v -tx1 | tr -d ' \n'; }
 
+# 1.4.0-beta15: on this phone the service takes the first free port of the ten from the set one (another app, or a
+# copy of the app in a parallel space, may hold the set port). Find it: the instance that holds THIS token answers
+# /v2/ping?me=<id>&n=<nonce> with sha256hex(K \n nonce \n ping \n K); nobody else can. A port that times out (a frozen
+# holder) ends the search: the wake-up below handles a frozen app.
+find_port() {
+  [ -n "$NOSIGN" ] || [ -z "$TOKEN" ] && return 0
+  case "$URL" in http://127.0.0.1:*|http://localhost:*) ;; *) return 0 ;; esac
+  _b=${URL%:*}; _p0=${URL##*:}; _p0=${_p0%%/*}
+  case "$_p0" in ''|*[!0-9]*) return 0 ;; esac
+  _n=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  _w=$(printf '%s\n%s\nping\n%s' "$K" "$_n" "$K" | sha)
+  _i=0
+  while [ $_i -lt 10 ]; do
+    _p=$((_p0 + _i)); _i=$((_i + 1))
+    _r=$(c -s -m 2 "$_b:$_p/v2/ping?me=$KID&n=$_n" 2>/dev/null); _rc=$?
+    case "$_r" in *"\"you\":\"$_w\""*) [ $_p -ne $_p0 ] && URL="$_b:$_p"; return 0 ;; esac
+    [ $_rc -eq 28 ] && [ $_i -eq 1 ] && return 0
+  done
+  return 0
+}
+find_port
+
 # req METHOD TARGET BODYFILE HEADERFILE OUTFILE [curl args…]: one request, signed when possible. Returns curl's status;
 # 90 when the reply's proof is wrong.
 req() {
   m="$1"; t="$2"; bf="$3"; hf="$4"; of="$5"; shift 5
   if [ -n "$NOSIGN" ]; then
-    if [ "$m" = "GET" ]; then c -sS -D "$hf" -o "$of" -H "Authorization: Bearer $TOKEN" "$@" "$URL$t"
-    else c -sS -X "$m" -D "$hf" -o "$of" -H "Authorization: Bearer $TOKEN" --data-binary "@$bf" "$@" "$URL$t"; fi
+    if [ "$m" = "GET" ]; then c -sS -H "X-VScreen-Client: cli" -D "$hf" -o "$of" -H "Authorization: Bearer $TOKEN" "$@" "$URL$t"
+    else c -sS -H "X-VScreen-Client: cli" -X "$m" -D "$hf" -o "$of" -H "Authorization: Bearer $TOKEN" --data-binary "@$bf" "$@" "$URL$t"; fi
     return $?
   fi
   ts=$(date +%s); nonce=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
   bh=$(sha < "$bf")
   sig=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s' "$K" "$ts" "$nonce" "$m" "$t" "$bh" "$K" | sha)
   if [ "$m" = "GET" ]; then
-    c -sS -D "$hf" -o "$of" -H "X-VScreen-Key: $KID" -H "X-VScreen-Time: $ts" -H "X-VScreen-Nonce: $nonce" -H "X-VScreen-Sign: $sig" "$@" "$URL$t"
+    c -sS -H "X-VScreen-Client: cli" -D "$hf" -o "$of" -H "X-VScreen-Key: $KID" -H "X-VScreen-Time: $ts" -H "X-VScreen-Nonce: $nonce" -H "X-VScreen-Sign: $sig" "$@" "$URL$t"
   else
-    c -sS -X "$m" -D "$hf" -o "$of" -H "X-VScreen-Key: $KID" -H "X-VScreen-Time: $ts" -H "X-VScreen-Nonce: $nonce" -H "X-VScreen-Sign: $sig" --data-binary "@$bf" "$@" "$URL$t"
+    c -sS -H "X-VScreen-Client: cli" -X "$m" -D "$hf" -o "$of" -H "X-VScreen-Key: $KID" -H "X-VScreen-Time: $ts" -H "X-VScreen-Nonce: $nonce" -H "X-VScreen-Sign: $sig" --data-binary "@$bf" "$@" "$URL$t"
   fi
   rq=$?; [ $rq -ne 0 ] && return $rq
   got=$(tr -d '\r' < "$hf" | sed -n 's/^[Xx]-[Vv][Ss]creen-[Pp]roof: *//p' | head -n1)
@@ -104,10 +136,13 @@ if [ "$1" = "install" ]; then
     done
   fi
   [ -n "$dest" ] || { echo "vscreen: «找不到可写的安装目录，请指定：vscreen install <令牌> <目录>|no writable install dir found, give one: vscreen install <token> <dir>»" >&2; exit 2; }
-  c -fsS "$URL/cli?via=install" -o "$dest/vscreen" || { echo "vscreen: «下载失败：Agent-VScreen 在运行吗？|download failed: is Agent-VScreen running?»" >&2; exit 3; }
+  # 1.4.0-beta7: which agent installed (the token's id, never its secret), so each agent has its own record.
+  tid=$(printf '%s' "$tok" | sed -n 's/^avs_\([a-z0-9]*\)_.*/\1/p')
+  c -fsS "$URL/cli?via=install&id=$tid" -o "$dest/vscreen" || { echo "vscreen: «下载失败：Agent-VScreen 在运行吗？|download failed: is Agent-VScreen running?»" >&2; exit 3; }
   chmod +x "$dest/vscreen"
   mkdir -p "$CONF_DIR"
   printf 'VSCREEN_URL=%s\nVSCREEN_TOKEN=%s\n' "$URL" "$tok" > "$CONF_DIR/env"
+  [ -n "$PROXY" ] && printf 'VSCREEN_PROXY=%s\n' "$PROXY" >> "$CONF_DIR/env"
   chmod 600 "$CONF_DIR/env" 2>/dev/null
   echo "«已安装：$dest/vscreen（令牌存在 $CONF_DIR/env）|Installed: $dest/vscreen (token saved in $CONF_DIR/env)»"
   skill_sync show
@@ -123,7 +158,9 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 : > "$tmp/empty"
 
 if [ "$1" = "events" ] && [ "$2" = "--raw" ]; then
-  req GET "/v2/events?session=$SESSION&wait=${3:-0}" "$tmp/empty" "$tmp/h" "$tmp/b"; rc=$?; cat "$tmp/b" 2>/dev/null; echo; exit $rc
+  req GET "/v2/events?session=$SESSION&wait=${3:-0}" "$tmp/empty" "$tmp/h" "$tmp/b"; rc=$?
+  if [ "$rc" -eq 0 ] && ! grep -q '^HTTP/[0-9.]* 200' "$tmp/h" 2>/dev/null; then rc=1; fi
+  cat "$tmp/b" 2>/dev/null; echo; exit $rc
 fi
 
 # The arguments, one per line, hex-encoded: any text (quotes, newlines, any language) arrives exactly as given.
@@ -132,27 +169,129 @@ for a in "$@"; do
   if [ -z "$a" ]; then echo 00 >> "$tmp/body"; else printf '%s' "$a" | hex >> "$tmp/body"; echo >> "$tmp/body"; fi
 done
 # A frozen app still accepts the connection (the kernel does) but never answers: find out in 5 s, not minutes.
-c -s -m 5 -o /dev/null "$URL/v2/ping"
-if [ $? -eq 28 ]; then
-  echo "vscreen: «Agent-VScreen 5 秒没有响应，多半是系统把它冻结在后台了。请用户打开一次 Agent-VScreen，按首页“后台运行受限”的提示允许它后台活动（荣耀/华为：应用启动管理 › 手动管理）。|Agent-VScreen did not answer for 5 s; the system most likely froze it in the background. Ask the user to open Agent-VScreen once and allow background activity as \"Background running restricted\" on its home page says (Honor/Huawei: App launch › Manage manually).»" >&2
-  exit 3
-fi
+# 1.3: on this phone, wake it first (an explicit broadcast thaws the process and starts the service), then try again.
+# 1.3 beta2: whether the connection itself was made is kept (time_connect): no connection = the phone is not
+# reachable (Tailscale node offline, network), which is not the same as an app that accepted it and stays silent.
+alive() { ct=$(c -s -m 5 -o "$tmp/ping" -w '%{time_connect}' "$URL/v2/ping"); }
+pidof_app() { sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$1" 2>/dev/null | head -n1; }
+# 1.3 beta7: a command whose app dies on the way never gets an answer (the connection to a proxy or a userspace
+# Tailscale stays open). While it runs, look every 20 s: the app answering with another process id (it restarted), or
+# not answering three times in a row, ends the wait with a clear message instead of hanging for minutes.
+# 1.3.0: it runs with its output on /dev/null: a caller reading our output through a pipe waits until every holder
+# of that pipe is gone, and a sleeping watcher held it for up to 20 s after the command had finished.
+watch_post() {
+  wp0=$(pidof_app "$tmp/ping"); miss=0
+  while kill -0 "$1" 2>/dev/null; do
+    # 1.3.0: one-second steps, so it ends within a second of the command (a lone `sleep 20` outlived it).
+    i=0; while [ $i -lt 20 ] && kill -0 "$1" 2>/dev/null; do sleep 1; i=$((i + 1)); done
+    kill -0 "$1" 2>/dev/null || break
+    if c -s -m 8 -o "$tmp/ping2" "$URL/v2/ping" 2>/dev/null; then
+      miss=0; wp=$(pidof_app "$tmp/ping2")
+      if [ -n "$wp0" ] && [ -n "$wp" ] && [ "$wp" != "$wp0" ]; then echo restarted > "$tmp/lost"; break; fi
+    else
+      miss=$((miss + 1)); [ $miss -ge 3 ] && { echo silent > "$tmp/lost"; break; }
+    fi
+  done
+  if [ -s "$tmp/lost" ]; then command -v pkill >/dev/null 2>&1 && pkill -P "$1" 2>/dev/null; kill "$1" 2>/dev/null; fi
+}
 # One request id for this command: if the connection breaks mid-way, the retry gets the result of the first run
 # instead of running the command a second time.
 rid="c$$-$(date +%s)-$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
 target="/v2/run?format=text&session=$SESSION&request_id=$rid"
-req POST "$target" "$tmp/body" "$tmp/h" "$tmp/b" --connect-timeout 5 -H "Content-Type: application/x-vscreen-hex" -H "Accept: text/plain"
-rc=$?
+# 1.3 beta4: why a remote phone does not answer, as precisely as this machine can tell. With the tailscale command
+# here, a Tailscale ping separates "the phone's node is offline" (service off or paused, phone offline, login needed)
+# from "the node is up but the app does not answer". Either way the user gets the one place to look.
+remote_probe() {
+  _rh=$(printf '%s' "$URL" | sed 's#^[a-z]*://##; s#[:/].*##'); _rv=
+  if command -v tailscale >/dev/null 2>&1; then
+    # Only a ping that went out and got nothing back says "offline"; a tailscale command that cannot reach its own
+    # daemon (userspace or another socket) knows nothing about the phone.
+    _ro=$(tailscale ping -c 1 --timeout 3s "$_rh" 2>&1); case "$_ro" in *pong*) _rv=up ;; *"timed out"*|*"no reply"*|*offline*) _rv=down ;; esac
+  fi
+}
+remote_why() {
+  if [ "$1" = en ]; then
+    case $_rv in
+      up) echo "The phone is online in Tailscale, but Agent-VScreen does not answer: the app may be frozen or restarting. Ask the user to open Agent-VScreen." ;;
+      down) echo "The phone's Tailscale node is offline. Usually the user's choice, not a fault: the service is On demand (devices elsewhere cannot wake it; it is online during a booked window or after an agent on the phone woke it) or Off. Next: the phone is offline or the built-in Tailscale needs logging in again. Ask the user to open Agent-VScreen and read the state at the top of its home page; for access at any time, choose Always on with the power button." ;;
+      *) echo "The phone did not answer. Most likely the user's choice, not a fault: the service is On demand (devices elsewhere cannot wake it; it is online during a booked window) or Off. Next: the phone is offline, its built-in Tailscale logged out, or less often the system froze the app. Ask the user to open Agent-VScreen and read the state at the top of its home page; for access at any time, choose Always on with the power button." ;;
+    esac
+  else
+    case $_rv in
+      up) echo "手机在 Tailscale 上在线，但 Agent-VScreen 没有回应：可能被系统冻结或正在重启。请用户打开一次 Agent-VScreen。" ;;
+      down) echo "手机的 Tailscale 节点不在线。通常是用户的选择而不是故障：服务是“按需”（其它设备叫不醒它，只在预约时间里或手机上的 agent 叫醒后在线）或“关闭”。其次是手机没网，或内置 Tailscale 要重新登录。请用户打开 Agent-VScreen 看首页顶上的状态；要随时连得上，在右上角电源键里选“常驻”。" ;;
+      *) echo "手机没有回应。多半是用户的选择而不是故障：服务是“按需”（其它设备叫不醒它，只在预约时间里在线）或“关闭”。其次是手机没网、内置 Tailscale 掉了登录，少数情况是系统把 App 冻结了。请用户打开 Agent-VScreen 看首页顶上的状态；要随时连得上，在右上角电源键里选“常驻”。" ;;
+    esac
+  fi
+}
+post() { req POST "$target" "$tmp/body" "$tmp/${1:-h}" "$tmp/${2:-b}" --connect-timeout 5 -H "Content-Type: application/x-vscreen-hex" -H "Accept: text/plain"; }
+# 1.3: the command and the liveness check go out together (before, the check came first and cost a round trip on
+# every command). If the check says the app is frozen, the command is abandoned, the app woken, and the command sent
+# again with the same request id (it runs once).
+post & ppid=$!
+alive; pr=$?
+# 1.4.0-beta4: on this phone a refused connection (curl 7) means the app is not running at all (never opened since a
+# restart, or cleared by the system). That is woken the same way as a frozen one; before, it went straight to
+# "cannot reach", and agents told the user to repair something that was only switched off.
+case "$URL" in http://127.0.0.1:*|http://localhost:*) [ $pr -eq 7 ] && { refused=1; pr=28; } ;; esac
+if [ $pr -ne 28 ]; then watch_post $ppid </dev/null >/dev/null 2>&1 & wpid=$!; wait $ppid; rc=$?; kill $wpid 2>/dev/null; wait $wpid 2>/dev/null; sent=1
+  if [ -s "$tmp/lost" ]; then
+    case "$(cat "$tmp/lost")" in
+      restarted) echo "vscreen: APP_RESTARTED «这条命令执行中，手机上的 Agent-VScreen 重启了（可能被系统杀掉后又拉起），回复丢了。命令可能做了一部分：先 vscreen act 看一眼现在的画面再决定。|Agent-VScreen on the phone restarted while this command ran (likely killed by the system and started again); the reply was lost. The command may be partly done: look with vscreen act before going on.»" >&2 ;;
+      *) remote_probe 2>/dev/null; echo "vscreen: NOT_READY «这条命令执行中，手机连续 1 分钟没有回应，不再等了。命令可能做了一部分。$(remote_why)|The phone stopped answering for a minute while this command ran; stopped waiting. The command may be partly done. $(remote_why en)»" >&2 ;;
+    esac
+    exit 3
+  fi
+else command -v pkill >/dev/null 2>&1 && pkill -P $ppid 2>/dev/null; kill $ppid 2>/dev/null; wait $ppid 2>/dev/null; sent=; fi
+if [ $pr -eq 28 ]; then
+  case "$URL" in
+    http://127.0.0.1:*|http://localhost:*)
+      if command -v am >/dev/null 2>&1; then
+        _wb=$(am broadcast -n com.kilon.agentvscreen/.host.WakeReceiver -a com.kilon.agentvscreen.WAKE 2>&1)
+        case "$_wb" in *'data="blocked"'*)
+          echo "vscreen: NOT_READY «用户关闭了 Agent-VScreen，叫不醒它。这是用户的选择，不是故障，不用修：请用户在 App 右上角的电源键里选“常驻”或“按需”。|The user turned Agent-VScreen off, so it cannot be woken. That is their choice, not a fault, and needs no repair: ask them to choose Always on or On demand with the power button at the top of the app.»" >&2
+          exit 3 ;;
+        esac
+        for i in 1 2 3; do sleep 2; alive && { pr=0; break; }; done
+        [ $pr -eq 0 ] && echo "«（Agent-VScreen 刚才没有响应，已唤醒）|(Agent-VScreen was not answering; it was woken up)»" >&2
+      fi ;;
+  esac
+fi
+# 1.3 beta5: a phone elsewhere that does not answer is never called "frozen" from here. Through a proxy (a userspace
+# Tailscale, a SOCKS / HTTP proxy) the connection is made to the proxy, so a made connection says nothing about the
+# phone; the likely causes are the remote ones (hidden, blocked, offline, logged out), with a ping to narrow them.
+if [ $pr -eq 28 ]; then
+  case "$URL" in
+    http://127.0.0.1:*|http://localhost:*) ;;
+    *) remote_probe; echo "vscreen: NOT_READY «5 秒内连不上手机（$URL）。$(remote_why)|could not reach the phone within 5 s ($URL). $(remote_why en)»" >&2
+       exit 3 ;;
+  esac
+fi
+if [ $pr -eq 28 ] && [ -n "$refused" ]; then
+  echo "vscreen: NOT_READY «Agent-VScreen 没在运行（用户还没打开它，或系统把它清掉了），叫也没叫起来。这不是故障，不用修：请用户打开一次 Agent-VScreen；手机重启过的话先启动 Shizuku。|Agent-VScreen is not running (the user has not opened it, or the system cleared it) and could not be started. This is not a fault and needs no repair: ask the user to open Agent-VScreen once; after a phone restart, start Shizuku first.»" >&2
+  exit 3
+fi
+if [ $pr -eq 28 ]; then
+  echo "vscreen: NOT_READY «Agent-VScreen 5 秒没有响应，唤醒也没成功，多半是系统把它冻结在后台了。请用户打开一次 Agent-VScreen，按首页“后台运行受限”的提示允许它后台活动（荣耀/华为：应用启动管理 › 手动管理）。定时任务请先 vscreen schedule 预约时间。|Agent-VScreen did not answer for 5 s and could not be woken; the system most likely froze it in the background. Ask the user to open Agent-VScreen once and allow background activity as \"Background running restricted\" on its home page says (Honor/Huawei: App launch › Manage manually). For timed tasks, book the time with vscreen schedule first.»" >&2
+  exit 3
+fi
+# (the abandoned first try may still be writing its files: the second one uses its own)
+[ -z "$sent" ] && { post h1 b1; rc=$?; mv -f "$tmp/h1" "$tmp/h" 2>/dev/null; mv -f "$tmp/b1" "$tmp/b" 2>/dev/null; }
 case $rc in 18|52|56)
   sleep 1
-  req POST "$target" "$tmp/body" "$tmp/h" "$tmp/b" --connect-timeout 5 -H "Content-Type: application/x-vscreen-hex" -H "Accept: text/plain"; rc=$? ;;
+  post; rc=$? ;;
 esac
 if [ $rc -eq 90 ]; then
   echo "vscreen: «回复的校验不对：回复不是这台手机上的 Agent-VScreen 发出的，或在路上被改过。结果没有采用。|the reply failed verification: it did not come from Agent-VScreen on this phone, or it was changed on the way. The result was discarded.»" >&2
   exit 3
 fi
 if [ $rc -ne 0 ]; then
-  echo "vscreen: «连不上 Agent-VScreen（$URL，curl $rc）：打开 Agent-VScreen，确认“服务”已启动；手机重启后要先启动 Shizuku 再打开它。|cannot reach Agent-VScreen ($URL, curl $rc): open Agent-VScreen and check the service is on; after a phone restart, start Shizuku first, then open it.»" >&2
+  case "$URL" in
+    http://127.0.0.1:*|http://localhost:*) echo "vscreen: NOT_READY «Agent-VScreen 没在运行（$URL，curl $rc）。这不是故障，不用修：请用户打开一次 Agent-VScreen；手机重启过的话先启动 Shizuku。|Agent-VScreen is not running ($URL, curl $rc). This is not a fault and needs no repair: ask the user to open Agent-VScreen once; after a phone restart, start Shizuku first.»" >&2 ;;
+    *) if [ -n "$PROXY" ]; then case $rc in 5|7|97)
+         echo "vscreen: «连不上本机的代理 $PROXY（curl $rc），请求没有发出去：检查代理是否在运行（例如 userspace tailscaled 的 SOCKS5 端口）。|cannot reach the local proxy $PROXY (curl $rc); the request never left this machine: check the proxy is running (e.g. the SOCKS5 port of a userspace tailscaled).»" >&2; exit 3 ;; esac; fi
+       remote_probe; echo "vscreen: «连不上手机上的 Agent-VScreen（$URL，curl $rc）。$(remote_why)|cannot reach Agent-VScreen on the phone ($URL, curl $rc). $(remote_why en)»" >&2 ;;
+  esac
   exit 3
 fi
 code=$(sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$tmp/h")
@@ -190,8 +329,9 @@ if [ -n "$imgs" ] && [ "$VSCREEN_SHOTS" != "none" ]; then
   for n in $imgs; do
     IFS=$old_ifs
     case "$n" in vscreen_*.jpg) ;; *) continue ;; esac
-    if req GET "/v2/shot/$n" "$tmp/empty" "$tmp/h3" "$SHOT_DIR/$n"; then
-      sed "s|http[s]*://[^ ]*/v2/shot/$n|$SHOT_DIR/$n|g" "$tmp/b" > "$tmp/b2" && mv "$tmp/b2" "$tmp/b"
+    if req GET "/v2/shot/$n" "$tmp/empty" "$tmp/h3" "$tmp/shot" && grep -q '^HTTP/[0-9.]* 200' "$tmp/h3" 2>/dev/null && [ -s "$tmp/shot" ]; then
+      mv -f "$tmp/shot" "$SHOT_DIR/$n" &&
+        sed "s|http[s]*://[^ ]*/v2/shot/$n|$SHOT_DIR/$n|g" "$tmp/b" > "$tmp/b2" && mv "$tmp/b2" "$tmp/b"
     fi
     IFS=,
   done

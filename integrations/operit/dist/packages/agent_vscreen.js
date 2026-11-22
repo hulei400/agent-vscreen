@@ -27,8 +27,8 @@
         {
             "name": "usage_advice",
             "description": {
-                "zh": "Agent-VScreen 使用建议：\\n- 用户让你在手机上做事（打开某个应用、查信息、比价、签到、看某页内容）时，用 vscreen 在副屏上做，不要动用户的主屏，也不要用 adb、screencap、input 代替。\\n- 每次任务开头先调用 vscreen，命令填 guide（一页，讲“看→做→核对”的循环和出错时怎么办）；提示没有令牌时，请用户在 Agent-VScreen › 接入 agent › 3. 令牌 复制令牌，再用 vscreen_configure 保存。\\n- 常用命令：launch <应用名>；act \"tap 搜索; type 耳机; key enter until text:综合\"；act（看一眼）；help act；done（这一轮做完）。\\n- 每次返回文字和截图；没做成时末尾有 ok=false、code 和 next（look 先看一眼 / fix_command 改命令 / ask_user 问用户 / retry_later 稍后再试），照 next 做。画面的意思由你看图判断。\\n- 付款等高风险步骤由用户在手机上确认：CONFIRM_PENDING 就请用户去手机上确认后再试，USER_DENIED 不要重试。登录、发送、删除、隐私内容也先问用户。用户在悬浮窗上按了停止（USER_STOPPED）就停下，把解除方法转告用户。",
-                "en": "Agent-VScreen advice:\\n- When the user asks you to do something on the phone (open an app, look something up, compare prices, check in, read a page), do it with vscreen on the background screen; don't touch the user's screen, and don't use adb, screencap or input instead.\\n- At the start of each task call vscreen with the command guide (one page: the look → act → check loop and what to do when something fails); if it says the token is missing, ask the user to copy it in Agent-VScreen › Connect an agent › 3. Token, then save it with vscreen_configure.\\n- Common commands: launch <app>; act \"tap Search; type headphones; key enter until text:All\"; act (take a look); help act; done (this turn is finished).\\n- Every result is text plus screenshots; when a command did not do what was asked it ends with ok=false, a code and next (look / fix_command / ask_user / retry_later): follow next. You judge what the screen means by looking.\\n- High-risk steps such as paying are confirmed by the user on the phone: on CONFIRM_PENDING ask the user to confirm there and try again; on USER_DENIED do not retry. Ask the user before logging in, sending, deleting or touching private content too. If the user pressed Stop on the floating window (USER_STOPPED), stop and pass on how to undo it."
+                "zh": "Agent-VScreen 使用建议：\n- 用户要你在手机上做事时，用 vscreen 在后台副屏上做；不要动用户的主屏，也不要用 adb、screencap、input 代替。\n- 每次任务开头调用 vscreen，命令填 guide（一页用法）；提示缺令牌时，请用户在 Agent-VScreen › 接入 agent › 3. 令牌 复制令牌（或在 权限 › 令牌 里给 Operit 新建一个），再用 vscreen_configure 保存。\n- 用法是一个循环：① 看：launch 或不带步骤的 act，读【现在】和截图。② 做：act 一小段步骤，最后一步写 until <你期待看到的>。③ 核对：ok 为真就继续；为假时这段停在了某一步，按 code / next 处理（help codes），先看图再决定。\n- 付款等高风险步骤由用户在手机上确认（CONFIRM_PENDING：请用户去手机上确认再重发；USER_DENIED：不要重试）；USER_STOPPED 时停下并转告怎么解除。\n遇到这些情况：\n- 用户要我在手机上做任何事：打开某个应用、查信息、比价、看某页内容、填表、发帖、测试应用…… → `launch <应用>` 打开并看，`act \"<步骤>\"` 点、滑、输入、按键，每次都返回截图和元素列表\n- 我要为一件会用到手机的事设定时：用户说了定时、每天、每周、到点（签到、打卡、抢购、定时查看），或我自己建了定时任务、周期任务、cron、自动化、提醒 → 两边都要设：我的定时只叫醒我，叫不醒手机。同一时间用 `schedule \"<时间>\" --name <名字>` 给手机预约，它会在每次之前拉起服务、检查权限，没准备好就提醒用户；改时间、取消时两边一起改\n- 要等一件以后才发生的事：到货、降价、有回复、直播开始、排队轮到、下载完成；或我想隔一会儿再看一次画面 → `act --stop \"text:到货\" --keep notify` 让手机一直盯着，看到就通知用户（`--keep wake` 改成叫醒我，用 `events` 取）\n- 要读完一个很长的列表或整页内容（全部订单、聊天记录、搜索结果、评论） → `collect --pages 10` 自动翻页，返回去重后的每一条\n- 不确定用户指的是画面上哪个东西（哪个商品、哪个按钮、哪条消息），或要用户选一个 → `ask \"你说的是哪一个？\"` 让用户在手机上的副屏画面里点出来（也可以 `--choose`、`--text`）\n- 一个流程说不清、试了几次都不对，或用户自己更清楚怎么做 → `teach \"要演示什么\"` 请用户在副屏上亲手做一遍，存成一段，之后 `act \"use 段名 参数\"` 照做\n- 同一个应用会反复用：有固定入口、每次都弹的窗、要先暂停的画面，或对机器节奏敏感 → `note` 给这个应用记经验、存步骤（`note save`）、设前置/收尾步骤和仿人节奏，下次 launch 会列出来\n- 有一步只能用户本人做（密码、验证码、人脸、扫码），或要用的应用用户正在用 → `handoff out` 把应用交到用户主屏并告诉他做什么；`handoff in` 把主屏上的应用接到副屏\n- 应用没声音，或用户要让某个应用静音、恢复声音 → `sound` 查看，`sound mute|unmute <应用>` 静音或恢复\n- 画面上的字太小、是图标，或者根本没有字（游戏、画布、图表），或想回看刚才发生了什么 → `look` 要图：现在的画面、放大一块、回看录像都用它；`spots` 找可点的色块\n- 连不上手机、命令一直失败或出了怪问题 → 先分清是没开还是坏了：没在运行、服务关着或收起是用户的选择，转告用户打开即可，不用修；`status` 里 ready 为假时才是故障，`fix` 修它列出的项，也恢复被留下静音的应用",
+                "en": "Agent-VScreen advice:\n- When the user asks for anything on the phone, do it with vscreen on the background screen; don't touch the user's screen, and don't use adb, screencap or input instead.\n- At the start of each task call vscreen with the command guide (one page of usage); if it says the token is missing, ask the user to copy it in Agent-VScreen › Connect an agent › 3. Token (or make one for Operit under Permissions › Tokens), then save it with vscreen_configure.\n- Use it as a loop: (1) look: launch, or act with no steps; read [Now] and the screenshot. (2) act: a short stretch of steps, the last one with until <what you expect to see>. (3) check: ok true, go on; false, the stretch stopped at a step: follow code / next (help codes) and look at the picture before deciding.\n- High-risk steps such as paying are confirmed by the user on the phone (CONFIRM_PENDING: ask the user to confirm there, then send again; USER_DENIED: don't retry); on USER_STOPPED stop and pass on how to undo it.\nWhen:\n- the user wants anything done on the phone: open an app, look something up, read a page, fill a form, test an app… → `launch <app>` opens it and looks, `act \"<steps>\"` taps, swipes, types and presses keys; every reply has a screenshot and the elements\n- anything timed that will use the phone: the user asks for daily or at 8:00 (check-ins, periodic checks), or I set up my own timer, cron or reminder → set both: my timer wakes me, not the phone. Book the same time with `schedule \"<when>\" --name <name>`; change or cancel both together\n- something will happen later: back in stock, a price drop, a reply, a download finishing; or I want to look again in a while → `act --stop \"text:In stock\" --keep notify` makes the phone keep watching and notify the user when seen (`--keep wake` wakes me; fetch with `events`)\n- a long list or a whole page has to be read (all orders, a chat history, search results, comments) → `collect --pages 10` pages through it and returns every item once\n- it is unclear which thing on the screen the user means (which item, button, message), or the user should pick one → `ask \"Which one do you mean?\"` lets the user tap it on the screen's picture on the phone (also `--choose`, `--text`)\n- a flow is hard to describe, keeps failing, or the user knows better how to do it → `teach \"what to show\"` asks the user to do it once on the screen; it is saved as a segment, then `act \"use <name> <values>\"` replays it\n- the same app comes up again and again: a fixed way in, a popup every visit, a picture to pause first, or machine-like timing upsets it → `note` keeps what I learned about the app, saved steps (`note save`), before/after steps and human pacing; the next launch lists them\n- a step only the user can do (password, code, face, scanning), or the app I need is the one the user is using → `handoff out` puts the app on the user's screen with what to do; `handoff in` takes the app from the user's screen\n- an app has no sound, or the user wants an app muted or its sound back → `sound` shows it, `sound mute|unmute <app>` mutes or unmutes\n- the text is too small or an icon, or there is no text at all (games, canvas, charts), or I need to see what just happened → `look` asks for pictures: the screen now, a region up close, or the recording; `spots` finds tappable color patches\n- the phone cannot be reached, commands keep failing, or something odd happens → First tell off from broken: not running, service off or hidden is the user's choice; tell the user to open it, nothing to repair. Only `status` with ready false is a fault, and `fix` repairs what it lists and gives sound back to apps left silent"
             },
             "parameters": [],
             "advice": true
@@ -79,11 +79,11 @@
 }
 */
 "use strict";
-// Talks to Agent-VScreen 1.2's /v2 API. On this phone: Authorization: Bearer <token>. From another device (Tailscale):
+// Talks to Agent-VScreen's /v2 API (1.2 or newer). On this phone: Authorization: Bearer <token>. From another device (Tailscale):
 // a signed request (X-VScreen-Key/Time/Nonce/Sign), so the token itself never travels — 1.2 refuses unsigned remote calls.
 const agentVScreen = (function () {
     const DEFAULT_URL = "http://127.0.0.1:18765";
-    const MAX_IMAGES = 4;
+    const MAX_IMAGES = 8; // 1.4.0-beta2: the app decides which pictures (ImagePolicy); this is only a safety cap
 
     function zh() {
         try {
@@ -196,6 +196,10 @@ const agentVScreen = (function () {
             "No Agent-VScreen token yet: ask the user to open Agent-VScreen and copy the token under \"Connect an agent › 3. Token\" (or make one for Operit under \"Permissions › Tokens\") and send it to you, then save it with vscreen_configure (or set VSCREEN_TOKEN in Operit's environment variables). If Agent-VScreen is not installed, install it and finish the setup on its home page first.");
     }
     function unreachable(cfg, why) {
+        // 1.4.0-beta4: on this phone, nothing listening means the app is simply not running: not a fault to repair.
+        if (/^http:\/\/(127\.0\.0\.1|localhost)[:/]/i.test(cfg.url))
+            return t("Agent-VScreen 没在运行（" + cfg.url + "，" + why + "）。这不是故障，不用修：请用户打开一次 Agent-VScreen；手机重启过的话先启动 Shizuku。",
+                "Agent-VScreen is not running (" + cfg.url + ", " + why + "). This is not a fault and needs no repair: ask the user to open Agent-VScreen once; after a phone restart, start Shizuku first.");
         return t("连不上 Agent-VScreen（" + cfg.url + "，" + why + "）：请用户打开 Agent-VScreen，确认首页“服务”在运行；手机重启后要先启动 Shizuku 再打开它。Agent-VScreen 在别的设备上时，用 vscreen_configure 填它的 Tailscale 地址。",
             "Cannot reach Agent-VScreen (" + cfg.url + ", " + why + "): ask the user to open Agent-VScreen and check that the service is running on its home page; after a phone restart, start Shizuku first, then open it. If Agent-VScreen runs on another device, set its Tailscale address with vscreen_configure.");
     }
@@ -232,17 +236,73 @@ const agentVScreen = (function () {
         return NativeInterface.registerImageFromBase64(String(r.contentBase64), "image/jpeg");
     }
 
-    async function run(cfg, command, session) {
+    // 1.4.0-beta15: on this phone the service takes the first free port of the ten from the set one (another app, or
+    // a copy of the app in a parallel space, may hold it). The instance holding THIS token proves it on
+    // /v2/ping?me=<id>&n=<nonce> with sha256hex(K \n nonce \n ping \n K); the port found is kept for the next calls.
+    let foundUrl = null;
+    async function locate(cfg) {
+        if (!isLocal(cfg.url) || !cfg.token) return cfg;
+        if (foundUrl && foundUrl.from === cfg.url) return { url: foundUrl.url, token: cfg.token };
+        const m = /^(.*):(\d+)$/.exec(cfg.url);
+        if (!m) return cfg;
+        const tk = parseToken(cfg.token);
+        const key = sha256(tk.secret);
+        const nonce = randomId(16);
+        const want = sha256(key + "\n" + nonce + "\nping\n" + key);
+        for (let i = 0; i < 10; i += 1) {
+            const url = m[1] + ":" + (Number(m[2]) + i);
+            try {
+                const r = await Tools.Net.http({ url: url + "/v2/ping?me=" + encodeURIComponent(tk.id) + "&n=" + nonce, method: "GET", connect_timeout: 2, read_timeout: 2, validateStatus: false });
+                const d = JSON.parse(String((r && r.content) || "{}"));
+                if (d && d.you === want) { foundUrl = { from: cfg.url, url: url }; return { url: url, token: cfg.token }; }
+            } catch (e) { if (i === 0 && /timeout/i.test(String(e && e.message))) return cfg; }
+        }
+        return cfg;
+    }
+
+    async function run(cfg0, command, session) {
+        const usedCached = Boolean(foundUrl && foundUrl.from === cfg0.url);
+        let cfg = await locate(cfg0);
+        const reqId = "operit-" + randomId(12);
         let res;
         try {
             // act can wait for minutes (wait / until / --watch); the server answers when the stretch ends.
-            res = await post(cfg, "/v2/run", { cmd: command, session: session, request_id: "operit-" + randomId(12) }, 330);
+            res = await post(cfg, "/v2/run", { cmd: command, session: session, request_id: reqId }, 330);
         } catch (e) {
-            return { ok: false, text: unreachable(cfg, e && e.message ? e.message : String(e)) };
+            if (usedCached) {
+                foundUrl = null;
+                cfg = await locate(cfg0);
+                try {
+                    res = await post(cfg, "/v2/run", { cmd: command, session: session, request_id: reqId }, 330);
+                } catch (e2) {
+                    return { ok: false, text: unreachable(cfg, e2 && e2.message ? e2.message : String(e2)) };
+                }
+            } else {
+                return { ok: false, text: unreachable(cfg, e && e.message ? e.message : String(e)) };
+            }
         }
         let data;
         try { data = JSON.parse(String(res.content || "")); } catch (e) {
-            return { ok: false, text: unreachable(cfg, "HTTP " + res.statusCode) };
+            if (usedCached) {
+                foundUrl = null;
+                cfg = await locate(cfg0);
+                try {
+                    res = await post(cfg, "/v2/run", { cmd: command, session: session, request_id: reqId }, 330);
+                    data = JSON.parse(String(res.content || ""));
+                } catch (e2) {
+                    return { ok: false, text: unreachable(cfg, res ? "HTTP " + res.statusCode : String(e2)) };
+                }
+            } else {
+                return { ok: false, text: unreachable(cfg, "HTTP " + res.statusCode) };
+            }
+        }
+        if (res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 429) {
+            const why = String((data && (data.error || data.text || data.message)) || "");
+            const code = String((data && data.code) || res.statusCode);
+            const fix = (code === "BAD_TOKEN" || code === "BAD_SIGNATURE")
+                ? t("请用户在 Agent-VScreen 的“接入 › 新建接入”（或“设置 › 令牌”）里重新生成令牌，再调用 vscreen_configure 保存。", "Ask the user to create a new token under \"Connect › Connect an agent\" (or \"Settings › Tokens\") in Agent-VScreen, then save it with vscreen_configure.")
+                : t("把这句原样转告用户。", "Pass this on to the user as it is.");
+            return { ok: false, code: code, text: code + (why ? "：" + why : "") + "\n" + fix };
         }
         if (res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 429) {
             const why = String((data && (data.error || data.text || data.message)) || "");
@@ -283,12 +343,22 @@ const agentVScreen = (function () {
         const over = {};
         if (params && params.token != null && String(params.token).trim()) over.token = String(params.token).trim();
         if (params && params.base_url != null && String(params.base_url).trim()) over.url = baseUrl(params.base_url);
-        if (over.token) await Tools.SoftwareSettings.writeEnvironmentVariable("VSCREEN_TOKEN", over.token);
-        if (over.url) await Tools.SoftwareSettings.writeEnvironmentVariable("VSCREEN_URL", over.url);
+        // Operit < 1.10 has no Tools.SoftwareSettings: the values cannot be saved from here. Check the connection with
+        // them anyway, then tell the user where to put them by hand instead of failing with a script error.
+        const settings = (typeof Tools !== "undefined" && Tools.SoftwareSettings && typeof Tools.SoftwareSettings.writeEnvironmentVariable === "function") ? Tools.SoftwareSettings : null;
+        let saved = true;
+        try {
+            if (settings && over.token) await settings.writeEnvironmentVariable("VSCREEN_TOKEN", over.token);
+            if (settings && over.url) await settings.writeEnvironmentVariable("VSCREEN_URL", over.url);
+        } catch (e) { saved = false; }
+        if (!settings) saved = false;
         const cfg = config(over);
         if (!cfg.token) return noToken();
         const r = await run(cfg, "status", "operit");
-        if (!r.ok) return r.text;
+        const manual = t("这个 Operit 版本不能由工具保存设置（需要 Operit 1.10 或更新）。请在 Operit 的工具包设置里手动填写环境变量 VSCREEN_TOKEN" + (over.url ? " 和 VSCREEN_URL（" + cfg.url + "）" : "") + "，或者升级 Operit。",
+            "This Operit version cannot save settings from a tool (needs Operit 1.10 or newer). Set the environment variable VSCREEN_TOKEN" + (over.url ? " and VSCREEN_URL (" + cfg.url + ")" : "") + " by hand in Operit's toolkit settings, or update Operit.");
+        if (!r.ok) return saved ? r.text : r.text + "\n" + manual;
+        if (!saved) return t("连接正常（" + cfg.url + "），但没有保存：", "Connected (" + cfg.url + "), but nothing was saved: ") + manual;
         return t("已保存，连接正常（" + cfg.url + "）。现在可以用 vscreen 了：先 guide 看用法，再 launch <应用名>。", "Saved and connected (" + cfg.url + "). vscreen is ready: guide first for the usage, then launch <app>.");
     }
 

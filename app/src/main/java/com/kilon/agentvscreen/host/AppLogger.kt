@@ -20,7 +20,13 @@ object AppLogger {
     fun warning(tag: String, msg: String) { Log.w(tag, msg); write("W", tag, msg) }
     fun error(tag: String, msg: String, t: Throwable? = null) { Log.e(tag, msg, t); write("E", tag, msg + (t?.let { " / ${it.javaClass.simpleName}: ${it.message}" } ?: "")) }
 
-    fun tail(lines: Int = 200): String = runCatching { file?.readLines()?.takeLast(lines)?.joinToString("\n") }.getOrNull() ?: ""
+    /** The last [lines] lines. 1.3.0: across the roll-over; right after it, the current file held only a few lines. */
+    @Synchronized fun tail(lines: Int = 200): String = runCatching {
+        val f = file ?: return@runCatching ""
+        val cur = if (f.isFile) f.readLines() else emptyList()
+        val old = if (cur.size < lines) File(f.parentFile, "agent-vscreen.1.log").takeIf { it.isFile }?.readLines()?.takeLast(lines - cur.size).orEmpty() else emptyList()
+        (old + cur).takeLast(lines).joinToString("\n")
+    }.getOrNull() ?: ""
 
     @Synchronized private fun write(level: String, tag: String, msg: String) {
         val f = file ?: return

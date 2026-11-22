@@ -33,15 +33,15 @@ class VScreenV49Test {
         assertEquals(StepTarget.Ref(7), Steps.parse("tap #7").target)
         assertEquals(StepTarget.Words("我的 订单"), Steps.parse("tap 我的 订单").target)
         val p = Steps.parse("press #3 2s")
-        assertEquals("press", p.kind); assertEquals(2_000L, p.ms)
+        assertEquals("press", p.kind.key); assertEquals(2_000L, p.ms)
         assertEquals(800L, Steps.parse("press 10 10").ms)
     }
 
     @Test fun gestures() {
         val s = Steps.parse("swipe 100 900 100 300 400ms")
-        assertEquals("swipe", s.kind); assertEquals(listOf(100 to 900, 100 to 300), s.points); assertEquals(400L, s.ms)
+        assertEquals("swipe", s.kind.key); assertEquals(listOf(100 to 900, 100 to 300), s.points); assertEquals(400L, s.ms)
         val d = Steps.parse("drag 1 2 3 4 5 6")
-        assertEquals("drag", d.kind); assertEquals(3, d.points.size); assertEquals(600L, d.ms)
+        assertEquals("drag", d.kind.key); assertEquals(3, d.points.size); assertEquals(600L, d.ms)
         refused { Steps.parse("swipe 1 2 3 4 5 6") }
         refused { Steps.parse("drag 1 2 3") }
         val sc = Steps.parse("scroll down #4")
@@ -51,7 +51,7 @@ class VScreenV49Test {
 
     @Test fun typeKeepsUntilOnlyWhenItParses() {
         val t = Steps.parse("type 耳机 until text:综合")
-        assertEquals("耳机", t.text); assertEquals("text", t.until!!.single().kind)
+        assertEquals("耳机", t.text); assertEquals("text", t.until!!.single().kind.key)
         val raw = Steps.parse("type wait until tomorrow")
         assertEquals("wait until tomorrow", raw.text); assertNull(raw.until)
         assertTrue(Steps.parse("type+ 你好").append)
@@ -63,26 +63,28 @@ class VScreenV49Test {
         refused { Steps.parse("key launchmissiles") }
         // 1.2: no home / recents on the background screen, by name or by keycode.
         assertTrue(refused { Steps.parse("key home") }.message.orEmpty().contains("没有 home 键"))
-        refused { Steps.parse("key 3") }
+        refused { Steps.parse("key 26") }
+        // 1.4.0-beta13: one digit is the digit key (key 3 types 3), never keycode 3.
+        assertEquals("3", Steps.parse("key 3").text)
         assertEquals("66", Steps.parse("key 66").text)
-        assertEquals("stable", Steps.parse("wait stable").until!![0].kind)
-        assertEquals("still", Steps.parse("wait still").until!![0].kind)
-        val sl = Steps.parse("wait 2s"); assertEquals("sleep", sl.kind); assertEquals(2_000L, sl.ms)
+        assertEquals("stable", Steps.parse("wait stable").until!![0].kind.key)
+        assertEquals("still", Steps.parse("wait still").until!![0].kind.key)
+        val sl = Steps.parse("wait 2s"); assertEquals("sleep", sl.kind.key); assertEquals(2_000L, sl.ms)
         val w = Steps.parse("wait text:完成 or gone:加载中 30s")
-        assertEquals("wait", w.kind); assertEquals(listOf("text", "gone"), w.until!!.map { it.kind }); assertEquals(30_000L, w.untilMs)
+        assertEquals("wait", w.kind.key); assertEquals(listOf("text", "gone"), w.until!!.map { it.kind.key }); assertEquals(30_000L, w.untilMs)
         assertEquals(Steps.WAIT_DEFAULT_MS, Steps.parse("wait stable").untilMs)
         assertEquals(2_000L, Steps.parse("tap 1 1 until change max 2s").untilMs)
-        assertEquals("use", Steps.parse("use 收菜").kind)
+        assertEquals("use", Steps.parse("use 收菜").kind.key)
         refused { Steps.parse("fly away") }
     }
 
     @Test fun conditions() {
         val c = Steps.cond("change:0,0,100,50")
-        assertEquals("change", c.kind); assertEquals(100, c.area!!.right)
-        assertEquals("stable", Steps.cond("stable").kind)
+        assertEquals("change", c.kind.key); assertEquals(100, c.area!!.right)
+        assertEquals("stable", Steps.cond("stable").kind.key)
         val col = Steps.cond("color:10,20=#FF0000~30")
         assertEquals(10, col.x); assertEquals(20, col.y); assertEquals(0xFF0000, col.color and 0xFFFFFF); assertEquals(30, col.tol)
-        assertEquals("app", Steps.cond("app:com.x").kind)
+        assertEquals("app", Steps.cond("app:com.x").kind.key)
         refused { Steps.cond("progress") }
         refused { Steps.cond("text:") }
         assertEquals(2, Steps.conds("text:到货 | text:有货").size)
@@ -102,8 +104,8 @@ class VScreenV49Test {
 
     @Test fun theCommandTableIsTheOptionSource() {
         val h = VScreenOffloadHandler(RuntimeEnvironment.getApplication())
-        assertEquals(setOf("stop", "watch", "fast", "bare", "keep", "for", "save", "paused", "confirmed", "async"), h.optionsOf("act"))
-        assertEquals(setOf("landscape", "portrait", "restart", "async"), h.optionsOf("launch"))
+        assertEquals(setOf("stop", "watch", "fast", "bare", "human", "keep", "for", "save", "paused", "confirmed", "async"), h.optionsOf("act"))
+        assertEquals(setOf("landscape", "portrait", "restart", "asked", "async"), h.optionsOf("launch"))
         assertNull(h.optionsOf("tap"))
         refused { h.checkOptions("act", listOf("--expect", "x")) }
         refused { h.checkOptions("act", listOf("--fast=1")) }

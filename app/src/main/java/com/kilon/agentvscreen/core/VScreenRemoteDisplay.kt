@@ -167,6 +167,10 @@ internal object VScreenRemoteDisplay {
     fun injectKey(displayId: Int, keyCode: Int, longPress: Boolean = false): Result<Boolean> =
         call(VScreenDisplayService.INJECT_KEY, { it.writeInt(displayId); it.writeInt(keyCode); it.writeInt(if (longPress) 1 else 0) }) { it.readInt() != 0 }
 
+    /** 1.4.0-beta13: a key with modifier keys held (see VScreenDisplayService.injectCombo). */
+    fun injectCombo(displayId: Int, keyCode: Int, mods: List<Int>): Result<Boolean> =
+        call(VScreenDisplayService.INJECT_COMBO, { it.writeInt(displayId); it.writeInt(keyCode); it.writeInt(mods.size); mods.forEach { m -> it.writeInt(m) } }) { it.readInt() != 0 }
+
     /** 1.2: characters typed as key events on [displayId] (ASCII; see VScreenDisplayService.injectText). */
     fun injectText(displayId: Int, text: String): Result<Boolean> =
         call(VScreenDisplayService.INJECT_TEXT, { it.writeInt(displayId); it.writeString(text) }) { it.readInt() != 0 }
@@ -256,6 +260,12 @@ internal object VScreenRemoteDisplay {
         }) { ApsRestored(it.readFloat(), it.readInt() != 0, it.readString() ?: "") }
 
     /** Keep-alive for the orphan reaper; cheap, fire-and-forget. */
+    /** 1.4.0-beta11: the service owns the sound of apps on our screens (see VScreenDisplayService.Sound). */
+    fun soundMute(pkg: String): Result<Int> = call(VScreenDisplayService.SOUND, { it.writeInt(0); it.writeString(pkg) }) { it.readInt() }
+    fun soundGive(pkg: String): Result<Unit> = call(VScreenDisplayService.SOUND, { it.writeInt(1); it.writeString(pkg) }) { }
+    fun soundGiveAll(): Result<Unit> = call(VScreenDisplayService.SOUND, { it.writeInt(3) }) { }
+    fun soundList(): Result<List<String>> = call(VScreenDisplayService.SOUND, { it.writeInt(2) }) { r -> List(r.readInt()) { r.readString().orEmpty() } }
+
     fun touch(displayId: Int) {
         if (!binderAlive(binder)) return
         call(VScreenDisplayService.TOUCH, { it.writeInt(displayId) }) { }

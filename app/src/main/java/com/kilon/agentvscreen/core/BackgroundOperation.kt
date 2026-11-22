@@ -2,12 +2,9 @@ package com.kilon.agentvscreen.core
 
 import com.kilon.agentvscreen.tr
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Bitmap
-import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -23,8 +20,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * [vscreen] 后台操作 — the coordinator behind Settings › 会话 › 后台操作,
@@ -57,8 +52,6 @@ object BackgroundOperation {
     private const val K_RECORDING = "recording_enabled"
     private const val K_TERM_AUTOSCROLL = "term_autoscroll"
     private const val K_WIN_SCALE = "window_scale"
-    private const val K_WIN_RIGHT = "window_right"
-    private const val K_WIN_Y = "window_y_fraction"
     private const val K_SCREEN_SIZE = "screen_size"
 
     /** How long a screen survives with no task using it. */
@@ -178,7 +171,8 @@ object BackgroundOperation {
      */
     @Volatile var dockedProvider: (() -> Boolean)? = null
 
-    @Volatile private var appContext: Context? = null
+    @Volatile internal var appContext: Context? = null
+        private set
     private lateinit var prefs: SharedPreferences
     private val lock = Any()
     @Volatile private var display: VScreenDisplay? = null
@@ -397,6 +391,11 @@ object BackgroundOperation {
         VScreenMap.init(context)
         VScreenRules.init(context)
         VScreenAwake.init(context)
+        // Apps muted on the background screen: the screen service owns their sound and gives it back by itself (also when
+        // this app dies or is uninstalled); a release here only makes it immediate.
+        VScreenMute.init(context)
+        com.kilon.agentvscreen.cmd.Draft.init(context)
+        onScreenReleased { Thread { runCatching { VScreenMute.restoreAll() } }.apply { isDaemon = true; name = "vscreen-unmute" }.start() }
         runCatching {
             val home = context.packageManager.resolveActivity(
                 android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME), 0,
@@ -565,9 +564,6 @@ object BackgroundOperation {
         }
     }
 
-    /** Was downscaling already turned off for [pkg] on this screen? */
-    fun isUnscaled(pkg: String): Boolean = unscaled.contains(pkg)
-
     fun currentDisplayId(): Int? = display?.takeIf { !it.released }?.displayId
 
     /** v0.5: the live background screen (null when none). */
@@ -588,13 +584,6 @@ object BackgroundOperation {
             pk.forEach { VScreenShell.resetDownscale(it) }
             VScreenDownscale.restoreAll()
         }.apply { isDaemon = true }.start()
-    }
-
-    /** `screen downscale restore`: put every saved setting back now (screen stays). */
-    fun restoreDownscaleNow(): List<String> {
-        val pk = synchronized(unscaled) { unscaled.toList().also { unscaled.clear() } }
-        pk.forEach { VScreenShell.resetDownscale(it) }
-        return pk.map { tr("已重置 $it 的 Android 降分辨率开关", "Reset Android's downscaling switch for $it") } + VScreenDownscale.restoreAll()
     }
 
     private val releaseListeners = java.util.concurrent.CopyOnWriteArrayList<(Int) -> Unit>()
@@ -630,6 +619,10 @@ object BackgroundOperation {
         mainHandler.removeCallbacks(idlePark)
         mainHandler.removeCallbacks(emptyCheck)
         _state.update { it.copy(powerSaving = false) }
+        // 1.4.0-beta11: a lesson being recorded ends with what the screen shows NOW, before its apps are closed and it
+        // is released (before, it read a destroyed screen for up to 10 s and the end picture was blank).
+        if (com.kilon.agentvscreen.cmd.Teach.lesson.value is com.kilon.agentvscreen.cmd.Lesson.Recording)
+            runCatching { com.kilon.agentvscreen.cmd.Teach.endRecording(appContext, byDone = false, screenGone = true, endWaitMs = 800L) }
         val d = synchronized(lock) { display.also { display = null } } ?: return
         // Close whatever app was left on the screen so it does not hop to the
         // main display when its display disappears.
@@ -641,8 +634,13 @@ object BackgroundOperation {
         restoreDownscale()
         // The page the flags were about is gone with the screen: the next screen starts with nothing to re-read.
         synchronized(lock) { tasks.values.forEach { it.rereadRequired = false; it.rereadReason = null } }
-        _state.update { it.copy(displayId = null, ownerSessionId = null, takeoverSessionId = null, operating = false, note = reason, page = ViewPage.TERMINAL) }
+        // 1.4.0-beta4: the task on a screen ends with the screen, even when its agent never said done.
+        _state.value.ownerSessionId?.let { TaskLog.onTurnEnd(it, _state.value.userStopped) }
+        _state.update { it.copy(displayId = null, ownerSessionId = null, takeoverSessionId = null, operating = false, note = reason, page = ViewPage.TERMINAL, terminalPopAt = 0L) }
         AppLogger.info(TAG, "released display ${d.displayId} gen=${d.generation}: $reason")
+        // A lesson being recorded and the questions answered on this screen end with it (1.3.0-beta14).
+        com.kilon.agentvscreen.cmd.Teach.screenClosed(appContext)
+        com.kilon.agentvscreen.host.UserAsk.screenGone(appContext, reason)
     }
 
     // ── task lifecycle (driven by ChatViewModel's isStreaming edge) ────────
@@ -669,13 +667,20 @@ object BackgroundOperation {
     fun onTaskFinished(sessionId: String) {
         if (sessionId.isEmpty()) return
         synchronized(lock) { tasks.remove(sessionId); turns.remove(sessionId) }
+        TaskLog.onTurnEnd(sessionId, _state.value.userStopped)
+        appContext?.let { c -> com.kilon.agentvscreen.host.UserAsk.withdrawSession(c, sessionId) }
+        // 1.4.0-beta10: a lesson the user took is theirs to finish; the agent's turn ending does not end it (withdraw
+        // above leaves the question the lesson answers alone).
         // A finger the agent left down (run … --keep without a release) never outlives the turn.
         if (_state.value.ownerSessionId == sessionId) display?.let { d ->
             Thread { runCatching { VScreenShell.finger(d.displayId, "cancel", 0, -1, -1) } }.apply { isDaemon = true }.start()
         }
         if (_state.value.ownerSessionId == sessionId && display != null) {
-            // A user takeover ends with the turn: nobody is holding the screen any more.
-            _state.update { it.copy(takeoverSessionId = null, operating = false, idle = true, agentTitle = null, note = tr("本轮结束，副屏保留 ${IDLE_TTL_MS / 60_000} 分钟", "Turn over; the screen is kept for ${IDLE_TTL_MS / 60_000} minutes")) }
+            // A user takeover ends with the turn: nobody is holding the screen any more. 1.4.0-beta11: except while the
+            // user is showing a lesson (getting ready or recording): that is the user's, not the turn's.
+            val lessonOn = com.kilon.agentvscreen.cmd.Teach.lesson.value.let { it is com.kilon.agentvscreen.cmd.Lesson.Ready || it is com.kilon.agentvscreen.cmd.Lesson.Recording }
+            val keep = if (lessonOn) _state.value.takeoverSessionId else null
+            _state.update { it.copy(takeoverSessionId = keep, operating = false, idle = true, agentTitle = null, note = tr("本轮结束，副屏保留 ${IDLE_TTL_MS / 60_000} 分钟", "Turn over; the screen is kept for ${IDLE_TTL_MS / 60_000} minutes")) }
             scheduleIdleRelease()
             scheduleIdlePark(if (parkSoonFor == sessionId) 1_500L else PARK_AFTER_MS)
             parkSoonFor = null
@@ -701,7 +706,10 @@ object BackgroundOperation {
     /** 1.1: the user's Stop: refuse the agent (USER_STOPPED) until [userResume]; a finger the agent holds is lifted. */
     fun userStop() {
         val d = display
+        _state.value.ownerSessionId?.let { TaskLog.stoppedByUser(it) }
+        val wasHeld = _state.value.takeoverSessionId != null
         _state.update { it.copy(userStopped = true, stoppedAt = System.currentTimeMillis(), takeoverSessionId = null, operating = false) }
+        if (wasHeld) com.kilon.agentvscreen.cmd.Teach.onTakeoverEnded(appContext)
         d?.let { Thread { runCatching { VScreenShell.finger(it.displayId, "cancel", 0, -1, -1) } }.apply { isDaemon = true }.start() }
         AppLogger.info(TAG, "user stop")
     }
@@ -711,7 +719,15 @@ object BackgroundOperation {
         val s = _state.value
         synchronized(lock) { s.ownerSessionId?.let { tasks[it]?.rereadRequired = true } }
         _state.update { it.copy(userStopped = false, stoppedAt = 0L, takeoverSessionId = null) }
+        if (s.takeoverSessionId != null) com.kilon.agentvscreen.cmd.Teach.onTakeoverEnded(appContext)
         AppLogger.info(TAG, "user allowed the AI to continue")
+        // 1.3.0-beta16: the agent hears it (vscreen events) instead of finding out on its next call.
+        if (s.takeoverSessionId != null || s.userStopped) s.ownerSessionId?.let { sid ->
+            appContext?.let { c -> com.kilon.agentvscreen.host.quiet("handback-event") {
+                com.kilon.agentvscreen.api.EventHub.post(c, sid, "handback", if (s.userStopped) "resume" else "takeover",
+                    tr("用户把副屏交还给你了：先看一眼现在的画面再继续", "The user handed the screen back to you: look at it before going on"))
+            } }
+        }
     }
 
     /**
@@ -726,13 +742,11 @@ object BackgroundOperation {
         val s = _state.value
         val owner = s.ownerSessionId
         if (owner == null) {
-            // The terminal-only window (a shell command popped it up, no screen): × hides it until the
-            // next command pops it again.
-            if (s.terminalPopAt > 0L) {
-                _state.update { it.copy(windowHidden = true, terminalPopAt = 0L) }
-                return tr("小窗已收起", "Window hidden")
-            }
-            return tr("没有副屏", "No screen")
+            // No screen. Hide the window regardless: if a stale terminal pop
+            // left an orphaned window up with no screen behind it, × must still
+            // dismiss it instead of only reporting "no screen".
+            _state.update { it.copy(windowHidden = true, terminalPopAt = 0L) }
+            return tr("小窗已收起", "Window hidden")
         }
         val turnRunning = synchronized(lock) { owner in turns }
         if (s.userStopped || !turnRunning) {
@@ -743,6 +757,7 @@ object BackgroundOperation {
         if (s.takeoverSessionId != null) {
             synchronized(lock) { tasks[owner]?.rereadRequired = true }
             _state.update { it.copy(takeoverSessionId = null) }
+            com.kilon.agentvscreen.cmd.Teach.onTakeoverEnded(appContext)
         }
         _state.update { it.copy(windowHidden = true, terminalPopAt = 0L) }
         AppLogger.info(TAG, "window hidden by the user (AI keeps working)")
@@ -859,12 +874,6 @@ object BackgroundOperation {
         _state.update { it.copy(agentTitle = title?.trim()?.take(40)?.takeIf { t -> t.isNotEmpty() }) }
     }
 
-    fun endTakeover(sessionId: String) {
-        if (_state.value.takeoverSessionId != sessionId) return
-        synchronized(lock) { tasks[sessionId]?.rereadRequired = true }
-        _state.update { it.copy(takeoverSessionId = null) }
-    }
-
     /** User touch while holding the screen. Maps preview coordinates already converted to screen px. */
     fun userTap(sessionId: String, x: Int, y: Int) = userInput(sessionId) { VScreenShell.tap(it, x, y) }
 
@@ -896,18 +905,17 @@ object BackgroundOperation {
     private fun acquireInner(sessionId: String?, create: Boolean, landscape: Boolean?, scale: Double): VScreenDisplay {
         val sid = sessionId?.takeIf { it.isNotEmpty() }
             ?: throw ActionError("NO_SESSION", tr("没有会话（请求头 X-VScreen-Session）", "No session (header X-VScreen-Session)"))
+        return acquireOwned(sid, create, landscape, scale).also { com.kilon.agentvscreen.host.Needs.got(sid) }
+    }
+
+    private fun acquireOwned(sid: String, create: Boolean, landscape: Boolean?, scale: Double): VScreenDisplay {
         val s0 = _state.value
         if (!s0.enabled) throw ActionError("DISABLED", tr("Agent-VScreen 的服务已被用户关闭。请用户打开 Agent-VScreen 点“启动服务”", "The user turned off the Agent-VScreen service. Ask the user to open Agent-VScreen and turn the service on"))
         if (s0.connection != Connection.READY) {
-            // Standalone: only the user's own 停止并释放 needs the user; a lost Shizuku that came back reconnects here.
-            if (s0.needsExplicitReconnect && s0.connection == Connection.DISCONNECTED) {
-                throw ActionError(
-                    "NOT_CONNECTED",
-                    tr("后台连接未就绪（${s0.connectionError ?: "需要明确重连"}）。请用户打开 Agent-VScreen 点“连接”，或执行 vscreen fix not_connected。不会改为在主屏操作。",
-                        "The background connection is not ready (${s0.connectionError ?: "needs an explicit reconnect"}). Ask the user to open Agent-VScreen, or run vscreen fix not_connected. It will not fall back to the main screen."),
-                )
-            }
-            // Enabled, never connected and never stopped: verify the channel once.
+            // 1.3: the service is on (checked above), so the user wants it working: connect now, whatever ended the last
+            // connection (the user's stop is undone by turning the service back on; a lost Shizuku may be back). Before,
+            // a connection the user had stopped once needed `vscreen fix not_connected` even after the service was
+            // turned on again, and `launch` failed with NOT_CONNECTED although the guide says it builds the screen.
             val after = connect()
             if (after.connection != Connection.READY) {
                 throw ActionError("NOT_CONNECTED", tr("后台连接失败：${after.connectionError}。不会改为在主屏操作。", "Background connection failed: ${after.connectionError}. It will not fall back to the main screen."))
@@ -923,7 +931,7 @@ object BackgroundOperation {
                     return cur
                 }
                 val ownerBusy = s.ownerSessionId != null && s.ownerSessionId != sid && tasks.containsKey(s.ownerSessionId)
-                if (ownerBusy) throw busy(s.ownerSessionId)
+                if (ownerBusy) throw busy(s.ownerSessionId, sid)
                 // The other session's screen is only idling (or its owner is gone): take it over
                 // as it is, page included. Never build a second screen next to it.
                 cancelIdleRelease()
@@ -942,7 +950,7 @@ object BackgroundOperation {
             val cur = display
             val s = _state.value
             if (cur != null && !cur.released) {
-                if (s.ownerSessionId != sid) throw busy(s.ownerSessionId)
+                if (s.ownerSessionId != sid) throw busy(s.ownerSessionId, sid)
                 return cur
             }
             // A previous process of this app may have left its screen in the Shizuku service: adopt it.
@@ -1108,8 +1116,6 @@ object BackgroundOperation {
         return null
     }
 
-    fun screenSizePref(): String? = if (::prefs.isInitialized) prefs.getString(K_SCREEN_SIZE, null) else null
-
     /** `screen size`: remember the size and release the screen so the next launch rebuilds it. */
     fun setScreenSize(sessionId: String?, v: String?) {
         if (!::prefs.isInitialized) return
@@ -1124,14 +1130,14 @@ object BackgroundOperation {
     @Volatile var ownerFreesInMs: (String) -> Long? = { null }
 
     /** 1.1: BUSY says who owns the screen, when it will be free by itself, and how the owner frees it now. */
-    private fun busy(owner: String?): ActionError = ActionError("BUSY",
+    private fun busy(owner: String?, sid: String): ActionError = com.kilon.agentvscreen.host.Needs.refused(sid, owner).let { busyError(owner) }
+
+    private fun busyError(owner: String?): ActionError = ActionError("BUSY",
         data = org.json.JSONObject().put("owner", owner ?: org.json.JSONObject.NULL)
             .put("frees_in_s", owner?.let { ownerFreesInMs(it) }?.let { (it + 999) / 1000 } ?: org.json.JSONObject.NULL),
         message =
         tr("副屏现在归会话“${owner ?: "?"}”", "The screen belongs to session \"${owner ?: "?"}\"") + (owner?.let { describeOwner(it) } ?: "") +
             tr("。要现在接手：在那个会话执行 vscreen done（结束它这一轮，页面留着给你接手）或 vscreen release（关掉副屏）", ". To take it now: in that session run vscreen done (ends its turn, leaves the page for you) or vscreen release (closes the screen)"))
-
-    fun mainMetrics(): Triple<Int, Int, Int>? = appContext?.let { mainScreenMetrics(it) }
 
     /** True when the screen was built landscape (wider than tall) before any rotation. */
     fun nativeLandscape(d: VScreenDisplay): Boolean = d.physWidth > d.physHeight
@@ -1146,7 +1152,7 @@ object BackgroundOperation {
         synchronized(lock) {
             val s = _state.value
             if (display != null && s.ownerSessionId != null && s.ownerSessionId != sid && tasks.containsKey(s.ownerSessionId))
-                throw busy(s.ownerSessionId)
+                throw busy(s.ownerSessionId, sid)
         }
         releaseScreen(reason ?: if (landscape) tr("按横屏重建副屏（应用横屏运行，避免旋转导致画面溢出/拉伸）", "Rebuilt the screen in landscape (the app runs landscape; avoids overflow / stretching from rotation)") else tr("按竖屏重建副屏", "Rebuilt the screen in portrait"))
         return acquire(sid, create = true, landscape = landscape, scale = scale)
@@ -1172,13 +1178,6 @@ object BackgroundOperation {
         while (actionLogBuf.size > LOG_MAX) actionLogBuf.removeFirst()
     }
 
-    /** The last [last] actions of [sessionId] (all sessions when null), oldest first. */
-    /** v21: attach the timeline screenshot to [sessionId]'s newest action (taken within [withinMs]). */
-    fun attachShot(sessionId: String, path: String, withinMs: Long = 120_000L) = synchronized(actionLogBuf) {
-        val e = actionLogBuf.lastOrNull { it.sessionId == sessionId } ?: return@synchronized
-        if (e.shot == null && !e.read && System.currentTimeMillis() - e.atMs < withinMs) e.shot = path
-    }
-
     fun actionLog(sessionId: String?, last: Int): List<LogEntry> = synchronized(actionLogBuf) {
         actionLogBuf.filter { sessionId == null || it.sessionId == sessionId }.takeLast(last.coerceIn(1, LOG_MAX))
     }
@@ -1197,6 +1196,10 @@ object BackgroundOperation {
         isRead: Boolean,
         describe: String,
         freshPage: Boolean = false,
+        // v18: actions that need no picture of the screen (stop closes a named package / the top task)
+        // skip only the re-read gate; the Guard check above and the flag itself are untouched, so the
+        // next act still has to look first.
+        skipReread: Boolean = false,
         block: (VScreenDisplay) -> T,
     ): T {
         val sid = sessionId ?: throw ActionError("NO_SESSION", tr("没有会话（请求头 X-VScreen-Session）", "No session (header X-VScreen-Session)"))
@@ -1204,6 +1207,9 @@ object BackgroundOperation {
         // it is one table (ScreenPhase.refusal), instead of a chain of flag checks in every caller.
         ScreenPhase.of(_state.value, sid).let { ph -> if (ph == ScreenPhase.STOPPED) throw ActionError("USER_STOPPED", userStoppedMessage()) }
         waitWhileTakenOver(sid)
+        // 1.4.0-beta2: the app this session was working on is with the user on the main screen. Whatever is under it
+        // on the background screen now is not what the agent planned for: refuse, never act on it.
+        if (!isRead && !freshPage) Guard.require(Guard.Act.INPUT.takeIf { VScreenOwnership.blocking(sid) != null } ?: Guard.Act.READ, null, sid)
         val d = acquire(sid, create = false)
         val startedMs = System.currentTimeMillis()
         if (!isRead) actionStarted[d.displayId] = startedMs
@@ -1212,12 +1218,15 @@ object BackgroundOperation {
             throw ActionError("STALE_SCREEN", tr("这个操作是针对旧副屏（第 $expectedGeneration 代）规划的，当前是第 ${d.generation} 代。", "This action was planned for an older screen (generation $expectedGeneration); the current one is generation ${d.generation}."))
         }
         val task = synchronized(lock) { tasks.getOrPut(sid) { TaskInfo(sid) } }
-        if (!isRead && !freshPage && task.rereadRequired) {
+        if (!isRead && !freshPage && !skipReread && task.rereadRequired) {
             val why = task.rereadReason
             if (why != null) throw ActionError("HOST_RESTARTED", tr("$why。动作没有执行：看清现在的画面再继续，不要假设上一轮的步骤已经完成", "$why. The action was not done: look at the screen now before going on, and don't assume the last turn's steps were completed"))
-            throw ActionError("REREAD_REQUIRED", tr("用户刚接管过副屏，页面可能已变化。动作没有执行：看清现在的画面再继续", "The user just took over the screen and the page may have changed. The action was not done: look at the screen now before going on"))
+            throw ActionError("REREAD_REQUIRED", tr("用户接管过副屏，页面可能已变化。动作没有执行：看清现在的画面再继续", "The user took over the screen and the page may have changed. The action was not done: look at the screen now before going on"))
         }
         runCatching { ensureUpright(d) }.onFailure { AppLogger.warning(TAG, "orientation check failed: ${it.message}") }
+        // 1.4.0-beta14 (test: collect stopped after one screen while the screen had gone to sleep): every command on
+        // the screen wakes it first, here, not only the ones that remembered to (act, look).
+        VScreenAwake.ensure(d)
         // v27 IME guard: the system focus (and with it the keyboard) belongs to the user's screen.
         val focus0 = if (!isRead && !describe.startsWith(tr("接力", "Relay"))) focusedNow() else null
         _state.update { it.copy(operating = true, action = describe.take(24)) }
@@ -1283,47 +1292,6 @@ object BackgroundOperation {
     fun nodeRoots(displayId: Int): List<AccessibilityNodeInfo> =
         VScreenAccessibilityService.getInstance()?.rootNodesForDisplay(displayId) ?: emptyList()
 
-
-    /** Visible texts / descriptions of [displayId]'s accessibility tree, or null when the service sees nothing there. */
-    /**
-     * 1.2.0: whether a visible node on [displayId] shows [norm] (normalised text) right now. A node whose cached text
-     * matches is refreshed and checked again: the cache of a background screen can keep a cleared box's old text, and
-     * `until gone:` then waited for words that were already gone. Null when the tree cannot be read.
-     */
-    fun a11yShows(displayId: Int, norm: (String) -> String, want: String): String? {
-        val roots = nodeRoots(displayId)
-        if (roots.isEmpty()) return null
-        var hit: String? = null
-        var seen = 0
-        fun walk(n: AccessibilityNodeInfo?, depth: Int) {
-            if (n == null || depth > 40 || hit != null || ++seen > 1500) return
-            val t = (n.text ?: n.contentDescription)?.toString()
-            if (t != null && n.isVisibleToUser && norm(t).contains(want)) {
-                val fresh = runCatching { n.refresh() }.getOrDefault(false)
-                val t2 = if (fresh) (n.text ?: n.contentDescription)?.toString() else t
-                if (t2 != null && (!fresh || n.isVisibleToUser) && norm(t2).contains(want)) { hit = t2.replace('\n', ' ').trim().take(40); return }
-            }
-            for (i in 0 until n.childCount) walk(runCatching { n.getChild(i) }.getOrNull(), depth + 1)
-        }
-        roots.forEach { walk(it, 0) }
-        return hit ?: ""
-    }
-
-    fun a11yTexts(displayId: Int, max: Int = 400): List<String>? {
-        val roots = nodeRoots(displayId)
-        if (roots.isEmpty()) return null
-        val out = ArrayList<String>()
-        fun walk(n: AccessibilityNodeInfo?, depth: Int) {
-            if (n == null || depth > 40 || out.size >= max) return
-            if (n.isVisibleToUser) {
-                (n.text ?: n.contentDescription)?.toString()?.replace('\n', ' ')?.trim()?.takeIf { it.isNotEmpty() }?.let { out += it.take(120) }
-            }
-            for (i in 0 until n.childCount) walk(runCatching { n.getChild(i) }.getOrNull(), depth + 1)
-        }
-        roots.forEach { walk(it, 0) }
-        return out
-    }
-
     private fun mainScreenMetrics(context: Context): Triple<Int, Int, Int> {
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1344,6 +1312,9 @@ object BackgroundOperation {
     }
 
     /** The live screen for the preview of [sessionId], or null. */
+    /** 1.4.0-beta13: the live screen with this id (its geometry maps system bounds to frame space), or null. */
+    fun displayById(id: Int): VScreenDisplay? = display?.takeIf { it.displayId == id && !it.released }
+
     fun previewDisplayFor(sessionId: String): VScreenDisplay? {
         val s = _state.value
         if (s.ownerSessionId != sessionId) return null
@@ -1360,15 +1331,6 @@ object BackgroundOperation {
         return if (v.isFinite() && v in min..max) v else def
     }
     fun windowScale(): Float = prefFloat(K_WIN_SCALE, 1f, 0.3f, 4f)
-    fun windowOnRight(): Boolean = if (::prefs.isInitialized) runCatching { prefs.getBoolean(K_WIN_RIGHT, true) }.getOrDefault(true) else true
-    fun windowYFraction(): Float = prefFloat(K_WIN_Y, 0.02f, 0f, 1f)
-    fun saveWindow(scale: Float, onRight: Boolean, yFraction: Float) {
-        if (!::prefs.isInitialized) return
-        val e = prefs.edit().putBoolean(K_WIN_RIGHT, onRight)
-        if (scale.isFinite() && scale in 0.3f..4f) e.putFloat(K_WIN_SCALE, scale)
-        if (yFraction.isFinite() && yFraction in 0f..1f) e.putFloat(K_WIN_Y, yFraction)
-        e.apply()
-    }
 
     /** True while a task of [sessionId] is running (a chat turn is streaming). */
     fun isTaskActive(sessionId: String?): Boolean = sessionId != null && synchronized(lock) { tasks.containsKey(sessionId) }

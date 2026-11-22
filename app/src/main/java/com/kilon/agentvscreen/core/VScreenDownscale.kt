@@ -20,7 +20,7 @@ import org.json.JSONObject
  *
  * Fix: through the shell-uid UserService, read the app's APS state, snapshot it (ratio + whether an
  * explicit per-app entry existed + that entry, parceled) into prefs, set the static ratio to 1.0, and
- * verify by reading it back. The snapshot survives a Minis crash; it is restored (entry re-set, or
+ * verify by reading it back. The snapshot survives an app crash; it is restored (entry re-set, or
  * deleted when there was none, then the ratio read back against the original) when the screen is
  * released, or on the next start when no screen is left. The APS ratio is per app, so the main-screen
  * copy of the same app also renders at full resolution until it is restored; results say so.
@@ -40,26 +40,22 @@ internal object VScreenDownscale {
     private fun fmt(f: Float) = "%.4f".format(f).trimEnd('0').trimEnd('.')
 
     data class Aps(val available: Boolean, val resolution: Float, val dynamic: Float, val hasInfo: Boolean,
-                   val info: ByteArray?, val error: String? = null) {
-        fun toJson(): JSONObject = if (!available) JSONObject().put("available", false).put("reason", error ?: tr("本机没有 aps_service", "This phone has no aps_service"))
-            else JSONObject().put("available", true).put("resolution", resolution.toDouble()).put("dynamic_ratio", dynamic.toDouble())
-                .put("explicit_app_entry", hasInfo)
-    }
+                   val info: ByteArray?, val error: String? = null)
 
     fun apsRead(pkg: String): Aps = VScreenRemoteDisplay.apsGet(pkg)
         .getOrElse { Aps(false, 1f, 1f, false, null, it.message) }
 
     /**
-     * v27: what `screen fit` can honestly promise for [pkg] on this phone. Never claims a cold start
-     * that will not happen (Honor APS writes are refused without the system permission).
+     * v27 / 1.4.1-beta1: what `launch <pkg> --restart` can honestly promise for [pkg] on this phone. Never claims a
+     * cold start that will not happen (Honor APS writes are refused without the system permission).
      */
     fun fitHint(pkg: String): String {
-        deniedRc?.let { return tr("本机无法关闭它的降分辨率（荣耀 APS 无写权限，本次已试过）；screen fit 会改用副屏逻辑尺寸适配（wmsize_fit，冷启动一次）。根治办法是用户手动：", "This phone cannot turn off its downscaling (no write permission to Honor APS, tried already); screen fit uses the screen's logical size instead (wmsize_fit, one cold start). The real fix is manual, by the user: ") + Vendor.current.downscaleHint() }
+        deniedRc?.let { return tr("本机无法关闭它的降分辨率（荣耀 APS 无写权限，本次已试过）；launch $pkg --restart 会改用副屏逻辑尺寸适配（wmsize_fit，冷启动一次）。根治办法是用户手动：", "This phone cannot turn off its downscaling (no write permission to Honor APS, tried already); launch $pkg --restart uses the screen's logical size instead (wmsize_fit, one cold start). The real fix is manual, by the user: ") + Vendor.current.downscaleHint() }
         val v = Vendor.device.vendor
         val aps = runCatching { apsRead(pkg).available }.getOrDefault(false)
         if ((v == "honor" || v == "huawei") && aps)
-            return tr("screen fit 会先尝试改 APS 比例（这类机型通常没有写权限）；改不了就把副屏逻辑尺寸设成它的实际渲染尺寸并冷启动一次（wmsize_fit，画面整体等比缩放、不再裁边）。根治办法是用户手动：", "screen fit first tries to change the APS ratio (such phones usually have no write permission); failing that it sets the screen's logical size to the real render size and cold-starts once (wmsize_fit: the picture scales evenly and is no longer cropped). The real fix is manual, by the user: ") + Vendor.current.downscaleHint()
-        return tr("screen fit 会尝试关闭它的降分辨率；只有设置确实改成了才冷启动一次，改不了就不重启", "screen fit tries to turn off its downscaling; it cold-starts once only if the setting really changed, otherwise it does not restart")
+            return tr("launch $pkg --restart 会先尝试改 APS 比例（这类机型通常没有写权限）；改不了就把副屏逻辑尺寸设成它的实际渲染尺寸并冷启动一次（wmsize_fit，画面整体等比缩放、不再裁边）。根治办法是用户手动：", "launch $pkg --restart first tries to change the APS ratio (such phones usually have no write permission); failing that it sets the screen's logical size to the real render size and cold-starts once (wmsize_fit: the picture scales evenly and is no longer cropped). The real fix is manual, by the user: ") + Vendor.current.downscaleHint()
+        return tr("launch $pkg --restart 会尝试关闭它的降分辨率；只有设置确实改成了才冷启动一次，改不了就不重启", "launch $pkg --restart tries to turn off its downscaling; it cold-starts once only if the setting really changed, otherwise it does not restart")
     }
 
     enum class Status { CHANGED, ALREADY_FULL, DENIED, UNSUPPORTED, FAILED }
@@ -239,17 +235,24 @@ internal object VScreenDownscale {
 
     private val token = HashMap<Int, Long>()
     private val notes = HashMap<Int, String>()
-    fun takeNote(displayId: Int): String? = synchronized(notes) { notes.remove(displayId) }
+    private val lateScaled = HashSet<String>()
     private fun note(displayId: Int, s: String) { synchronized(notes) { notes[displayId] = s }; AppLogger.info(TAG, s) }
 
+    /** Consume the pending late-downscale notice for [displayId] (wired into the next reply's 【注意】). */
+    fun takeNote(displayId: Int): String? = synchronized(notes) { notes.remove(displayId) }
+
+    /** True once if [pkg] was seen scaling late after an earlier launch, so `launch <pkg> --restart` unscales at splash time too. */
+    fun consumeLateScaled(pkg: String): Boolean = synchronized(lateScaled) { lateScaled.remove(pkg) }
+
     /**
-     * After a launch, look again at 4–60 s. Splash screens are often drawn at full size and the game page
+     * After a launch, look again at 4–60 s. Splash screens are often drawn at full size and the main page
      * is scaled seconds later. Only detects and reports (in the next tool result): fixing restarts the
-     * app, so it is left to `screen fit`, which runs under the agent's screen lease.
+     * app, so it is left to `launch <pkg> --restart`, which runs under the agent's screen lease.
      */
     fun watchAfterLaunch(d: VScreenDisplay, pkg: String) {
         val my = SystemClock.elapsedRealtimeNanos()
         synchronized(token) { token[d.displayId] = my }
+        synchronized(notes) { notes.remove(d.displayId) }
         Thread {
             val t0 = SystemClock.elapsedRealtime()
             fun alive() = !d.released && synchronized(token) { token[d.displayId] == my } &&
@@ -261,6 +264,7 @@ internal object VScreenDownscale {
                 val gs = VScreenShell.windowScale(d.displayId, pkg)
                 val crop = surfaceCrop(pkg)
                 if (!((gs != null && gs > 1.02) || crop?.cropped == true)) continue
+                synchronized(lateScaled) { lateScaled += pkg }
                 val what = "compat ${gs?.let { "%.2f".format(it) } ?: "?"}x" + (crop?.let { ", ${it.describe()}" } ?: "")
                 note(d.displayId, tr("$pkg 启动约 ${at / 1000} 秒后被系统缩放（$what），副屏右侧/下方会被裁。", "$pkg was scaled by the system about ${at / 1000} s after start ($what); the right / bottom of the screen gets cropped. ") + fitHint(pkg))
                 return@Thread

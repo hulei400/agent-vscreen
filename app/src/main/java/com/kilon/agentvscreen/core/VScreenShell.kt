@@ -101,9 +101,9 @@ internal object VScreenShell {
             val why = VScreenDisplay.lastRemoteError?.let { tr("（Shizuku 副屏服务不可用：$it，只能用 App 自建副屏，系统不允许 shell 往上启动应用）", " (Shizuku screen service unavailable: $it; only the app's own screen can be used, and the system does not let the shell start apps on it)") } ?: ""
             fail("LAUNCHED_ON_MAIN_SCREEN", tr("系统把 $targetPkg 开到了主屏，而不是副屏 $displayId$why。不要在主屏上继续操作，请告诉用户。", "The system opened $targetPkg on the main screen instead of screen $displayId$why. Do not go on operating the main screen; tell the user."))
         } else if (top == null) {
-            ok(tr("已请求在副屏 $displayId 启动 $what（无法确认副屏顶部应用，请 read 核实）", "Asked to start $what on screen $displayId (cannot confirm the top app on the screen; check with read)"))
+            ok(tr("已请求在副屏 $displayId 启动 $what（无法确认副屏顶部应用，请用 look 核实）", "Asked to start $what on screen $displayId (cannot confirm the top app on the screen; check with look)"))
         } else {
-            fail("LAUNCH_NOT_ON_TOP", tr("副屏 $displayId 顶部是 $top，不是 $targetPkg；请 read 查看副屏状态", "The top of screen $displayId is $top, not $targetPkg; check the screen with read"))
+            fail("LAUNCH_NOT_ON_TOP", tr("副屏 $displayId 顶部是 $top，不是 $targetPkg；请用 look 看一眼副屏", "The top of screen $displayId is $top, not $targetPkg; look at the screen"))
         }
     }
 
@@ -230,7 +230,7 @@ internal object VScreenShell {
     }
 
     /**
-     * Packages the background screen must never force-stop: Minis itself (the agent runs in it),
+     * Packages the background screen must never force-stop: this app itself,
      * the launcher and the system UI. Set from BackgroundOperation.init.
      */
     @Volatile var protectedPackages: Set<String> = setOf("com.android.systemui", "android")
@@ -291,8 +291,6 @@ internal object VScreenShell {
     @Volatile internal var mapper: ((Int, Float, Float) -> Pair<Float, Float>)? = null
     private fun mx(d: Int, x: Int, y: Int): Pair<Int, Int> =
         mapper?.invoke(d, x.toFloat(), y.toFloat())?.let { Math.round(it.first) to Math.round(it.second) } ?: (x to y)
-    /** Where a frame point lands in input space (for diagnostics). */
-    fun inputPoint(displayId: Int, x: Int, y: Int): Pair<Int, Int> = mx(displayId, x, y)
 
     /**
      * 1.2: the one way input reaches a display. The default goes to the Shizuku display service; tests replace it.
@@ -301,6 +299,7 @@ internal object VScreenShell {
     interface Injector {
         fun gesture(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int, holdMs: Int): Result<Boolean>
         fun key(displayId: Int, code: Int): Result<Boolean>
+        fun combo(displayId: Int, code: Int, mods: List<Int>): Result<Boolean> = Result.failure(UnsupportedOperationException("combo"))
         fun text(displayId: Int, text: String): Result<Boolean>
         fun pointer(displayId: Int, op: Int, pointerId: Int, x: Float, y: Float): Result<Pair<Boolean, Int>>
     }
@@ -309,6 +308,7 @@ internal object VScreenShell {
         override fun gesture(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int, holdMs: Int) =
             VScreenRemoteDisplay.injectDrag(displayId, x1, y1, x2, y2, durationMs, holdMs)
         override fun key(displayId: Int, code: Int) = VScreenRemoteDisplay.injectKey(displayId, code)
+        override fun combo(displayId: Int, code: Int, mods: List<Int>) = VScreenRemoteDisplay.injectCombo(displayId, code, mods)
         override fun text(displayId: Int, text: String) = VScreenRemoteDisplay.injectText(displayId, text)
         override fun pointer(displayId: Int, op: Int, pointerId: Int, x: Float, y: Float) = VScreenRemoteDisplay.pointer(displayId, op, pointerId, x, y)
     }
@@ -316,32 +316,40 @@ internal object VScreenShell {
     /** How long a tap's finger stays down. */
     private const val TAP_MS = 60
 
-    private fun injected(what: String, displayId: Int, r: Result<Boolean>): Outcome = when {
+    private fun injected(what: String, displayId: Int, r: Result<Boolean>, spanMs: Long = 0L): Outcome = run {
+        // 1.3.0: the motion our own input causes is not the page moving by itself (see MotionTrack.action). Called
+        // when the input is done; [spanMs] is how long it lasted (a swipe, a press).
+        if (r.getOrNull() == true) com.kilon.agentvscreen.host.quiet("motion-action") { VScreenPerception.noteAction(displayId, spanMs) }
+        injectedOutcome(what, displayId, r)
+    }
+
+    private fun injectedOutcome(what: String, displayId: Int, r: Result<Boolean>): Outcome = when {
         r.getOrNull() == true -> ok(tr("副屏 $displayId：$what 已注入", "screen $displayId: $what injected"))
-        r.isFailure -> fail("NOT_CONNECTED", tr("副屏服务（Shizuku）不可用，$what 没有做：${r.exceptionOrNull()?.message}。status 看原因，fix not_connected 重连", "The screen service (Shizuku) is unavailable, $what was not done: ${r.exceptionOrNull()?.message}. See status for the cause; fix not_connected reconnects"))
+        r.isFailure -> fail("NOT_CONNECTED", tr("副屏服务（Shizuku）不可用，$what 没有做：${r.exceptionOrNull()?.message}。多半是 Shizuku 停了：请用户打开 Shizuku 启动它", "The screen service (Shizuku) is unavailable, $what was not done: ${r.exceptionOrNull()?.message}. Most likely Shizuku stopped: ask the user to start it in Shizuku"))
         else -> fail("INPUT_FAILED", tr("系统拒绝了副屏 $displayId 上的 $what 注入", "The system refused injecting $what on screen $displayId"))
     }
 
-    fun tap(displayId: Int, x: Int, y: Int): Outcome {
+    fun tap(displayId: Int, x: Int, y: Int, holdMs: Int = TAP_MS): Outcome {
         val (ix, iy) = mx(displayId, x, y)
-        return injected("tap", displayId, injector.gesture(displayId, ix, iy, ix, iy, 0, TAP_MS))
+        val hold = holdMs.coerceIn(30, 250)
+        return injected("tap", displayId, injector.gesture(displayId, ix, iy, ix, iy, 0, hold), hold.toLong())
     }
 
     fun longPress(displayId: Int, x: Int, y: Int, ms: Int): Outcome {
         val (ix, iy) = mx(displayId, x, y)
-        return injected("press", displayId, injector.gesture(displayId, ix, iy, ix, iy, 0, ms.coerceIn(300, 10_000)))
+        return injected("press", displayId, injector.gesture(displayId, ix, iy, ix, iy, 0, ms.coerceIn(300, 10_000)), ms.coerceIn(300, 10_000).toLong())
     }
 
     /** A swipe: the finger moves at an even speed and lifts while moving, so lists fling (hold = -1). */
     fun swipe(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, ms: Int): Outcome {
         val (a, b) = mx(displayId, x1, y1); val (c, e) = mx(displayId, x2, y2)
-        return injected("swipe", displayId, injector.gesture(displayId, a, b, c, e, ms.coerceIn(50, 5000), -1))
+        return injected("swipe", displayId, injector.gesture(displayId, a, b, c, e, ms.coerceIn(50, 5000), -1), ms.coerceIn(50, 5000).toLong())
     }
 
     /** A precise drag: eased, with a still hold at the end (no fling). */
     fun drag(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int, holdMs: Int): Outcome {
         val (a, b) = mx(displayId, x1, y1); val (c, e) = mx(displayId, x2, y2)
-        return injected("drag", displayId, injector.gesture(displayId, a, b, c, e, durationMs.coerceIn(50, 5000), holdMs.coerceIn(0, 3000)))
+        return injected("drag", displayId, injector.gesture(displayId, a, b, c, e, durationMs.coerceIn(50, 5000), holdMs.coerceIn(0, 3000)), (durationMs.coerceIn(50, 5000) + holdMs.coerceIn(0, 3000)).toLong())
     }
 
     /** Held finger [pointerId] (multi-touch across calls): op "down" | "move" | "up" | "cancel". */
@@ -355,14 +363,57 @@ internal object VScreenShell {
 
     data class KeyResult(val outcome: Outcome, val method: String)
 
-    /** The keycode of a key name ([KEYS]) or of a number; null when it is neither. */
-    fun keyCode(key: String): Int? = key.trim().lowercase().let { KEYS[it] ?: it.toIntOrNull()?.takeIf { c -> c in 1..400 && c !in FORBIDDEN_KEYS } }
+    /**
+     * The keycode of a key name ([KEYS]), a letter, a digit, f1–f12, or a number; null when it is none of them.
+     * 1.4.0-beta13: letters and digits too, for shortcuts (`key ctrl+a`).
+     */
+    fun keyCode(key: String): Int? = key.trim().lowercase().let { k ->
+        KEYS[k] ?: when {
+            k.length == 1 && k[0] in 'a'..'z' -> 29 + (k[0] - 'a')
+            Regex("f([1-9]|1[0-2])").matches(k) -> 130 + k.drop(1).toInt()
+            else -> k.toIntOrNull()?.let { n -> if (k.length == 1) 7 + n else n.takeIf { c -> c in 1..400 && c !in FORBIDDEN_KEYS } }
+        }
+    }
+
+    /** Modifier names a shortcut may use, and the key each one is. Meta / Win is left out: its shortcuts are the system's (home, recents) on the MAIN screen. */
+    val MODIFIERS: Map<String, Int> = linkedMapOf("ctrl" to 113, "control" to 113, "shift" to 59, "alt" to 57)
+
+    /** `ctrl+shift+z` → (key, modifiers); null when it is not a shortcut. Throws with the reason when it is one we refuse. */
+    fun combo(key: String): Pair<Int, List<Int>>? {
+        val parts = key.trim().lowercase().split('+').map { it.trim() }
+        if (parts.size < 2 || parts.any { it.isEmpty() }) return null
+        val bad = parts.dropLast(1).filter { it !in MODIFIERS }
+        if (bad.isNotEmpty()) throw IllegalArgumentException(if (bad.any { it in setOf("meta", "win", "cmd", "super") })
+            tr("不支持 ${bad.first()} 组合键：它的快捷键属于系统（桌面、多任务），会作用在用户的主屏上", "${bad.first()} shortcuts are not supported: they belong to the system (home, recents) and act on the user's main screen")
+            else tr("不认识的修饰键 ${bad.joinToString()}（可用：ctrl shift alt）", "unknown modifier ${bad.joinToString()} (available: ctrl shift alt)"))
+        val code = keyCode(parts.last()) ?: throw IllegalArgumentException(tr("组合键里不认识的键 ${parts.last()}", "unknown key ${parts.last()} in the shortcut"))
+        if (parts.last() in setOf("tab", "esc", "escape") && "alt" in parts) throw IllegalArgumentException(tr("不支持 alt+${parts.last()}：这是系统切换应用的快捷键，会作用在主屏上", "alt+${parts.last()} is not supported: it is the system's app switcher and acts on the main screen"))
+        return code to parts.dropLast(1).map { MODIFIERS.getValue(it) }.distinct()
+    }
+
+    /** Whether [key] is a key or a shortcut we can press; the reason when not. */
+    fun keyProblem(key: String): String? = runCatching { if (keyCode(key) != null || combo(key) != null) null else "" }.getOrElse { it.message ?: "" }
 
     /** Key event on [displayId], injected with the display id set. */
     fun keyWithMethod(displayId: Int, key: String): KeyResult {
+        if (key.length > 1 && '+' in key) {
+            val c = runCatching { combo(key) }.getOrElse { return KeyResult(fail("INVALID_ARGS", it.message ?: key), "none") }
+            if (c != null) return KeyResult(injected(tr("组合键 $key", "shortcut $key"), displayId, again { injector.combo(displayId, c.first, c.second) }), "inject")
+        }
         val code = keyCode(key)
             ?: return KeyResult(fail("INVALID_ARGS", tr("未知按键 $key（可用：${KEYS.keys.joinToString(" ")} 或数字 keycode；没有 home / 多任务键）", "Unknown key $key (available: ${KEYS.keys.joinToString(" ")} or a numeric keycode; there is no home / recents key)")), "none")
-        return KeyResult(injected(tr("按键 $key", "key $key"), displayId, injector.key(displayId, code)), "inject")
+        return KeyResult(injected(tr("按键 $key", "key $key"), displayId, again { injector.key(displayId, code) }), "inject")
+    }
+
+    /**
+     * 1.4.0-beta14 (test: `key ctrl+a` once came back "the system refused the injection" and worked when sent again):
+     * a key the input system turns down once (it was busy dispatching the previous one) is sent once more.
+     */
+    private fun again(send: () -> Result<Boolean>): Result<Boolean> {
+        val r = send()
+        if (r.getOrNull() == true) return r
+        Thread.sleep(150)
+        return send()
     }
 
     fun key(displayId: Int, key: String): Outcome = keyWithMethod(displayId, key).outcome

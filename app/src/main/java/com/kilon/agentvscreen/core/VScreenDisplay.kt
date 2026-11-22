@@ -123,6 +123,17 @@ class VScreenDisplay private constructor(
         return ((x - ox) / s).coerceIn(0f, iw - 1f) to ((y - oy) / s).coerceIn(0f, ih - 1f)
     }
 
+    /** 1.4.0-beta13: input pixel -> frame (agent) pixel, the inverse of [toInput], for bounds the system reports. */
+    fun toFrame(r: android.graphics.Rect): android.graphics.Rect {
+        val iw = inputWidth.takeIf { it > 0 } ?: width
+        val ih = inputHeight.takeIf { it > 0 } ?: height
+        val fw = width; val fh = height
+        if (iw == fw && ih == fh) return r
+        val s = minOf(fw.toFloat() / iw, fh.toFloat() / ih)
+        val ox = (fw - iw * s) / 2f; val oy = (fh - ih * s) / 2f
+        return android.graphics.Rect((r.left * s + ox).toInt(), (r.top * s + oy).toInt(), (r.right * s + ox).toInt(), (r.bottom * s + oy).toInt())
+    }
+
     /** Human description of frame space vs input space, for results and `screen info`. */
     fun geometryJson(): org.json.JSONObject {
         val iw = inputWidth.takeIf { it > 0 } ?: width
@@ -443,28 +454,6 @@ class VScreenDisplay private constructor(
     fun requestFreshFrame() { lastConvertMs = 0L }
 
     /**
-     * Wait until the screen stops changing: [stableSamples] consecutive
-     * samples [sampleMs] apart with no visible change (structural signature),
-     * after at least [minMs], or until [timeoutMs]. Returns (frame, waitedMs,
-     * stable). A static screen produces no new frames, which counts as stable.
-     */
-    fun settle(minMs: Long = 300, timeoutMs: Long = 1_500, stableSamples: Int = 2, sampleMs: Long = 150): Triple<Bitmap?, Long, Boolean> {
-        val start = SystemClock.elapsedRealtime()
-        var prev: ScreenSig? = null
-        var same = 0
-        while (true) {
-            requestFreshFrame()
-            Thread.sleep(sampleMs)
-            val now = SystemClock.elapsedRealtime()
-            val sig = ScreenSig.of(latest)
-            if (sig != null && prev != null && sig.compare(prev).kind == ScreenSig.Kind.NONE) same++ else same = 0
-            prev = sig ?: prev
-            if (same >= stableSamples && now - start >= minMs) return Triple(latest, now - start, true)
-            if (now - start >= timeoutMs) return Triple(latest, now - start, false)
-        }
-    }
-
-    /**
      * A frame at least as new as [notOlderThanMs] (elapsed realtime), waiting
      * up to [timeoutMs] for one. Used by screenshots taken right after an
      * action, so the agent sees the result of what it just did.
@@ -517,7 +506,7 @@ class VScreenDisplay private constructor(
 
         /**
          * Take over a display the Shizuku service still holds from a previous
-         * Minis process: give it a fresh ImageReader surface. Null on failure.
+         * app process: give it a fresh ImageReader surface. Null on failure.
          */
         internal fun adopt(e: VScreenRemoteDisplay.Existing): VScreenDisplay? {
             val thread = HandlerThread("minis-vscreen-frames").apply { start() }

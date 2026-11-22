@@ -179,14 +179,22 @@ class ShizukuBackend(private val appContext: Context) {
             .onFailure { AppLogger.warning(TAG, "openInstallPage($url) failed: ${it.message}") }
     }
 
-    fun requestPermission() {
-        if (!pingTimed()) return
-        if (Shizuku.shouldShowRequestPermissionRationale()) {
-            AppLogger.warning(TAG, "permission permanently denied — user must enable in the manager app")
-            return
+    /**
+     * 1.3.0-beta18 (GitHub #2): what a tap on "grant" did. It used to return silently when Shizuku had the app on
+     * record as denied, so the button "did nothing" and the user had to revoke it in Shizuku before asking again.
+     */
+    enum class Ask { NO_BINDER, ALREADY, ASKED, DENIED_ON_RECORD, FAILED }
+
+    fun requestPermission(): Ask {
+        // r45: pingTimed() — a dead binder must time out instead of blocking this call forever.
+        if (!pingTimed()) return Ask.NO_BINDER
+        if (isPermissionGranted()) return Ask.ALREADY
+        if (runCatching { Shizuku.shouldShowRequestPermissionRationale() }.getOrDefault(false)) {
+            AppLogger.warning(TAG, "Shizuku has this app on record as denied: it shows no dialog; the user allows it in the manager app")
+            return Ask.DENIED_ON_RECORD
         }
-        runCatching { Shizuku.requestPermission(PERMISSION_REQUEST_CODE) }
-            .onFailure { AppLogger.warning(TAG, "requestPermission failed: ${it.message}") }
+        return runCatching { Shizuku.requestPermission(PERMISSION_REQUEST_CODE); Ask.ASKED }
+            .getOrElse { AppLogger.warning(TAG, "requestPermission failed: ${it.message}"); Ask.FAILED }
     }
 
     private fun versionOrUnknown(): Int = runCatching {

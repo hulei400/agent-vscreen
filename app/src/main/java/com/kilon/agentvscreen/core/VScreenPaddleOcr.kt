@@ -19,9 +19,14 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * [vscreen] Accurate on-device OCR: PaddleOCR PP-OCRv6 small (detection + recognition),
- * run with ONNX Runtime inside the app. Official ONNX exports:
- * huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx and ..._rec_onnx (Apache-2.0).
+ * [vscreen] Accurate on-device OCR: PaddleOCR PP-OCRv6 (tiny detection + small recognition), run with ONNX Runtime
+ * inside the app. Official ONNX exports huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx and PP-OCRv6_small_rec_onnx
+ * (Apache-2.0), weights stored as float16 (inputs and outputs stay float32; ONNX Runtime folds the casts at load).
+ *
+ * 1.4: chosen by tools/ocr-bench (rendered phone screens with known text, the same pipeline as here): tiny detection
+ * finds as much text as small and is faster; tiny recognition misses every character outside its 6.9k-character
+ * dictionary (names, rare words), so recognition stays small. Float16 storage reads the same as float32 on the bench.
+ * 11.5 MB instead of 31 MB, and reads slightly more exactly than 1.3's small + small.
  *
  * Pipeline (mirrors PaddleOCR's DBPostProcess + CTCLabelDecode, simplified for screens,
  * where text is axis-aligned):
@@ -40,7 +45,7 @@ import kotlin.math.roundToInt
  */
 internal object VScreenPaddleOcr {
     private const val TAG = "VScreenPaddleOcr"
-    const val ENGINE = "pp-ocrv6-small (on-device, onnxruntime)"
+    const val ENGINE = "pp-ocrv6 tiny-det + small-rec (fp16 weights, fp32 compute; on-device, onnxruntime)"
     private const val DIR = "vscreen-ocr"
     /** v41: 1280 (was 960) — small game text on a 2800-wide screen is lost at 960. */
     private const val DET_LONG = 1280
@@ -62,6 +67,45 @@ internal object VScreenPaddleOcr {
         runCatching { context.assets.open("$DIR/det.onnx").close(); true }.getOrDefault(false)
 
     fun loadError(): String? = loadError
+    /** Set when a model had to be built without the CPU-specific rewrite (see engine()). */
+    @Volatile var optNote: String? = null; private set
+
+    /**
+     * 1.4.0-beta2: one real reading of a known picture (assets/vscreen-ocr/selftest.png) with this phone's runtime.
+     * Unit tests run on a computer and cannot catch a model this phone's runtime cannot build or read; this can.
+     * Returns words found, which of [EXPECT] were among them, and the time; throws when the engine fails.
+     */
+    val EXPECT = listOf("取消", "Search", "收藏", "已开启")
+    fun selfTest(context: Context): Triple<List<String>, List<String>, Long> {
+        val bmp = context.assets.open("$DIR/selftest.png").use { android.graphics.BitmapFactory.decodeStream(it) }
+        try {
+            val t0 = android.os.SystemClock.elapsedRealtime()
+            val words = recognize(context, bmp).map { it.text }
+            return Triple(words, EXPECT.filter { w -> words.any { it.contains(w) } }, android.os.SystemClock.elapsedRealtime() - t0)
+        } finally { bmp.recycle() }
+    }
+
+    /**
+     * 1.4.1-beta1: unpack an asset ONNX model to noBackupFilesDir once per app version via a small streaming buffer,
+     * so ONNX Runtime loads directly from a file path instead of copying megabytes into a JVM ByteArray on cold start.
+     */
+    internal fun modelFile(context: Context, name: String): java.io.File {
+        val root = java.io.File(context.noBackupFilesDir ?: context.filesDir, DIR).apply { mkdirs() }
+        val out = java.io.File(root, name)
+        val stamp = java.io.File(root, "$name.ver")
+        val want = com.kilon.agentvscreen.BuildConfig.VERSION_CODE.toString()
+        if (out.isFile && out.length() > 0L && stamp.isFile && runCatching { stamp.readText().trim() }.getOrNull() == want) return out
+        val tmp = java.io.File(root, "$name.tmp")
+        context.assets.open("$DIR/$name").use { input ->
+            java.io.FileOutputStream(tmp).use { output -> input.copyTo(output, 8192) }
+        }
+        if (!tmp.renameTo(out)) {
+            tmp.copyTo(out, overwrite = true)
+            tmp.delete()
+        }
+        runCatching { stamp.writeText(want) }
+        return out
+    }
 
     @Synchronized
     private fun engine(context: Context): Engine {
@@ -69,13 +113,20 @@ internal object VScreenPaddleOcr {
         loadError?.let { throw IllegalStateException(it) }
         try {
             val env = OrtEnvironment.getEnvironment()
+            // 1.4.0-beta2: the full optimisation level rewrites the graph per CPU (layout to NHWC, special kernels); on
+            // beta1's phone that rewrite asked for a kernel the runtime does not have. A model that cannot be built that
+            // way is built again without the CPU-specific rewrite (plain kernels, the same answers), and that is logged.
             fun session(name: String): OrtSession {
-                val bytes = context.assets.open("$DIR/$name").use { it.readBytes() }
-                val opts = OrtSession.SessionOptions().apply {
+                val path = modelFile(context, name).absolutePath
+                fun build(level: OrtSession.SessionOptions.OptLevel): OrtSession = OrtSession.SessionOptions().apply {
                     setIntraOpNumThreads(max(1, min(4, Runtime.getRuntime().availableProcessors() / 2)))
-                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    setOptimizationLevel(level)
+                }.use { opts -> env.createSession(path, opts) }
+                return try { build(OrtSession.SessionOptions.OptLevel.ALL_OPT) } catch (e: ai.onnxruntime.OrtException) {
+                    AppLogger.warning(TAG, "$name at ALL_OPT failed (${e.message?.take(200)}); building at EXTENDED_OPT")
+                    optNote = "$name: EXTENDED_OPT (${e.message?.take(120)})"
+                    build(OrtSession.SessionOptions.OptLevel.EXTENDED_OPT)
                 }
-                return env.createSession(bytes, opts)
             }
             val dict = context.assets.open("$DIR/dict.txt").bufferedReader(Charsets.UTF_8).use { r ->
                 r.readLines().filter { it.isNotEmpty() }

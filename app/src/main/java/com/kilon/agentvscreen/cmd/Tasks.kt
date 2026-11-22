@@ -39,11 +39,16 @@ internal object Tasks {
             prune()
             if (tasks.values.count { it.result == null } >= MAX_RUNNING) throw ActionError("BUSY", tr("已经有 $MAX_RUNNING 个任务在运行：task 看列表，等一个做完或 task cancel", "$MAX_RUNNING tasks are already running: task lists them; wait for one or task cancel"))
             val id = "t" + (++seq) + "-" + java.lang.Long.toString((Math.random() * 46656).toLong(), 36)
-            val c = Call(sid, parent?.tokenId ?: "main", parent?.tokenName ?: "main", parent?.scopes ?: setOf("look", "operate", "system"), parent?.peer, parent?.requestId, parent?.lang, parent?.trustUntil ?: 0L)
+            val c = Call(sid, parent?.tokenId ?: "main", parent?.tokenName ?: "main", parent?.scopes ?: setOf("look", "operate", "system"), parent?.peer, parent?.requestId, parent?.lang, parent?.trustUntil ?: 0L, parent?.via ?: com.kilon.agentvscreen.api.Abilities.Via.CLI)
+            c.taskId = id
             Task(id, sid, c.tokenId, com.kilon.agentvscreen.host.Audit.redact(argv).take(120), c).also { tasks[id] = it }
         }
+        // 1.3: a task is part of its session's turn for as long as it runs. Before, only the request that started it
+        // counted, so after the quiet minutes the turn ended (screen paused, takeover dropped) under a task still working.
+        com.kilon.agentvscreen.api.Turns.begin(sid)
         val run = I18n.carry {
-            Call.with(t.call) { h.handle(NativeOffloadRequest(listOf("vscreen") + argv, sid)) }
+            try { Call.with(t.call) { h.handle(NativeOffloadRequest(listOf("vscreen") + argv, sid)) } }
+            finally { com.kilon.agentvscreen.api.Turns.end(sid) }
         }
         pool.execute {
             val r = try { run() } catch (e: Throwable) { h.err("INTERNAL_ERROR", "${e.javaClass.simpleName}: ${e.message}") }
@@ -71,20 +76,23 @@ internal object Tasks {
         val t = synchronized(tasks) { tasks[id] }?.takeIf { it.owner == owner } ?: throw ActionError("NOT_FOUND", tr("没有任务 $id（结果只保留 30 分钟）：task 看列表", "No task $id (results are kept for 30 minutes): task lists them"))
         if (cancel) {
             if (t.result == null) t.call.cancelled = true
-            return NativeOffloadResult(0, (if (t.result == null) tr("已要求任务 $id 停下：它会在当前这一步之后停。task $id 看它停在哪", "Task $id was asked to stop: it stops after its current step. task $id shows where it stopped") else tr("任务 $id 已经做完了，没有可取消的：task $id 取结果", "Task $id has already finished, nothing to cancel: task $id returns its result")) + "\n", "OK", JSONObject().put("task", id).put("state", t.state))
+            return NativeOffloadResult(0, (if (t.result == null) tr("已要求任务 $id 停下：它会在当前这一步之后停。task $id 看它停在哪", "Task $id was asked to stop: it stops after its current step. task $id shows where it stopped") else tr("任务 $id 已经结束了（不一定成功），没有可取消的：task $id 看它的结果", "Task $id has already ended (not necessarily successfully), nothing to cancel: task $id shows its result")) + "\n", "OK", JSONObject().put("task", id).put("state", t.state))
         }
-        val wait = (args.getLong("wait") ?: 0L).coerceIn(0L, 120_000L)
+        val wait = boundedMs("wait", args.getLong("wait") ?: 0L, 0L, WAIT_MAX_MS)
         val until = System.currentTimeMillis() + wait
         synchronized(t.lock) {
             while (t.result == null && System.currentTimeMillis() < until && Call.current()?.cancelled != true) t.lock.wait(250)
         }
         val r = t.result ?: return NativeOffloadResult(0, tr("任务 $id 还在运行（${(System.currentTimeMillis() - t.startedAt) / 1000}s）", "Task $id is still running (${(System.currentTimeMillis() - t.startedAt) / 1000}s)") +
-            (t.call.lastProgress?.let { tr("。最近完成的一步：$it", ". Last finished step: $it") } ?: "") + tr("。task $id --wait 60s 等它", ". task $id --wait 60s waits for it") + "\n", "TASK_RUNNING",
+            (t.call.lastProgress?.let { tr("。最近完成的一步：$it", ". Last finished step: $it") } ?: "") + tr("。task $id --wait 2m 再等（一次最长 2m）", ". task $id --wait 2m waits again (at most 2m per call)") + "\n", "TASK_RUNNING",
             JSONObject().put("task", id).put("state", t.state).put("last_step", t.call.lastProgress ?: JSONObject.NULL))
         // The task's own result, as if the command had been called directly.
         return r.copy(data = (r.data ?: JSONObject()).put("task", id).put("state", t.state))
     }
 
     /** For status / diag: running tasks, without their arguments. */
+    /** One `task <id> --wait` holds the connection at most this long (a client's HTTP timeout must not cut it). */
+    const val WAIT_MAX_MS = 120_000L
+
     fun running(): Int = synchronized(tasks) { tasks.values.count { it.result == null } }
 }

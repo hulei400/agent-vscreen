@@ -36,18 +36,6 @@ internal object VScreenGame {
      */
     fun isValue(w: String): Boolean = w.any { it.isDigit() } && w.count { it.isLetter() } <= 3
 
-    /**
-     * v48: a change that says nothing about the page: a value, or a mark of one or two letters/symbols (a play/pause
-     * glyph read as "ⅱ", an arrow) — never a CJK word.
-     */
-    fun isMinor(w: String): Boolean = isValue(w) || (w.length <= 2 && w.none { it.code in 0x3040..0x9FFF || it.code in 0xAC00..0xD7AF })
-
-    /** v48: the pure numbers on the screen (00:21.57, 120, 3/5) with where they are — left out of [uiItems]. */
-    fun valueItems(items: List<VScreenOcr.Item>): List<Pair<String, android.graphics.Rect>> = items
-        .filter { !VScreenOcr.isJunk(it) }
-        .map { VScreenOcr.norm(it.text) to it.box }
-        .filter { (w, _) -> w.isNotEmpty() && w.any { it.isDigit() } && NUMERIC.matches(w) }
-
     /** Normalised words that make up the UI layer (counters and timers left out: they tick on their own). */
     fun uiWords(items: List<VScreenOcr.Item>): Set<String> = uiItems(items).map { it.first }.toSet()
 
@@ -66,11 +54,6 @@ internal object VScreenGame {
         val same: Boolean get() = added.isEmpty() && removed.isEmpty()
         /** Enough words on both sides to judge the page by them. */
         val meaningful: Boolean get() = maxOf(before, after) >= 3
-    }
-
-    fun uiDiff(before: List<VScreenOcr.Item>, after: List<VScreenOcr.Item>): UiDiff {
-        val b = uiWords(before); val a = uiWords(after)
-        return UiDiff(b.size, a.size, (a - b).toList(), (b - a).toList())
     }
 
     // ── regions ─────────────────────────────────────────────────────────────
@@ -98,29 +81,10 @@ internal object VScreenGame {
         }.getOrNull()
     }
 
-    /** Share of pixels of region [r] that changed between [a] and [b] (same size frames). -1 = cannot tell. */
-    fun regionDiff(a: Bitmap?, b: Bitmap?, r: Rect): Double {
-        if (a == null || b == null || a.width != b.width || a.height != b.height) return -1.0
-        val s = (64f / maxOf(r.width(), r.height(), 1)).coerceIn(0.05f, 1f)
-        val ga = gray(a, r, s) ?: return -1.0
-        val gb = gray(b, r, s) ?: return -1.0
-        if (ga.second != gb.second || ga.third != gb.third) return -1.0
-        var n = 0
-        for (i in ga.first.indices) if (abs(ga.first[i] - gb.first[i]) > 28) n++
-        return n.toDouble() / ga.first.size
-    }
-
     // ── patch tracking ──────────────────────────────────────────────────────
 
     /** A remembered look of one target: grayscale template at [scale] of [box]. */
     class Patch(val box: Rect, val px: IntArray, val w: Int, val h: Int, val scale: Float)
-
-    fun patchOf(frame: Bitmap, box: Rect): Patch? {
-        if (box.width() < 8 || box.height() < 8) return null
-        val s = (40f / maxOf(box.width(), box.height())).coerceIn(0.08f, 1f)
-        val g = gray(frame, box, s) ?: return null
-        return Patch(Rect(box), g.first, g.second, g.third, s)
-    }
 
     /**
      * Where [p] is now in [frame], searched within [radius] px of its old place.
@@ -158,46 +122,6 @@ internal object VScreenGame {
         if (score < 0.8) return null
         val left = area.left + (bx / p.scale).roundToInt(); val top = area.top + (by / p.scale).roundToInt()
         return Rect(left, top, left + p.box.width(), top + p.box.height()) to score.coerceIn(0.0, 1.0)
-    }
-
-    /**
-     * [p] anywhere in [frame] (or inside [area]): a coarse search at half the template's scale,
-     * then a fine search around the best coarse hit. Returns (box, score) or null.
-     */
-    fun findAnywhere(p: Patch, frame: Bitmap, area: Rect? = null): Pair<Rect, Double>? {
-        val full = area ?: Rect(0, 0, frame.width, frame.height)
-        // Coarse level: at most ~320 px across the search area, and never finer than half the template.
-        val r = minOf(0.5f, 320f / maxOf(full.width(), full.height(), 1) / p.scale).coerceAtLeast(0.05f)
-        val s2 = p.scale * r
-        val tpl = Bitmap.createBitmap(p.w, p.h, Bitmap.Config.ARGB_8888).apply {
-            setPixels(IntArray(p.px.size) { val g = p.px[it].coerceIn(0, 255); (0xff shl 24) or (g shl 16) or (g shl 8) or g }, 0, p.w, 0, 0, p.w, p.h)
-        }
-        val tw = (p.w * r).roundToInt().coerceAtLeast(3); val th = (p.h * r).roundToInt().coerceAtLeast(3)
-        val small = Bitmap.createScaledBitmap(tpl, tw, th, true)
-        tpl.recycle()
-        val tp = IntArray(tw * th); small.getPixels(tp, 0, tw, 0, 0, tw, th); small.recycle()
-        val t = IntArray(tw * th) { tp[it] and 0xff }
-        val g = gray(frame, full, s2) ?: return null
-        val (px, aw, ah) = g
-        if (aw < tw || ah < th) return null
-        val tm = t.average()
-        var best = Double.MAX_VALUE; var bx = 0; var by = 0
-        for (y in 0..(ah - th)) for (x in 0..(aw - tw)) {
-            var sum = 0L
-            for (j in 0 until th) { val row = (y + j) * aw + x; for (i in 0 until tw) sum += px[row + i] }
-            val wm = sum.toDouble() / (tw * th)
-            var sad = 0.0
-            for (j in 0 until th) {
-                val row = (y + j) * aw + x; val trow = j * tw
-                for (i in 0 until tw) sad += abs((px[row + i] - wm) - (t[trow + i] - tm))
-                if (sad >= best) break
-            }
-            if (sad < best) { best = sad; bx = x; by = y }
-        }
-        if (1.0 - best / (tw * th * 64.0) < 0.7) return null
-        val left = full.left + (bx / s2).roundToInt(); val top = full.top + (by / s2).roundToInt()
-        val guess = Patch(Rect(left, top, left + p.box.width(), top + p.box.height()), p.px, p.w, p.h, p.scale)
-        return track(guess, frame, maxOf(24, (4 / s2).roundToInt()))
     }
 
     // ── orientation ─────────────────────────────────────────────────────────
@@ -293,10 +217,4 @@ internal object VScreenGame {
     /** In-app credit: points, coins, balances, vouchers, tokens, gems. */
     val CREDIT = Regex("积分|点数|点券|金币|代币|余额|券|豆|币|钻|credits?|points?|coins?|tokens?|gems?|diamonds?", RegexOption.IGNORE_CASE)
 
-    /** "real_money" / "credit" / "unknown" for the price text around a commit. */
-    fun moneyKind(text: String): String = when {
-        REAL_MONEY.containsMatchIn(text) -> "real_money"
-        CREDIT.containsMatchIn(text) -> "credit"
-        else -> "unknown"
-    }
 }

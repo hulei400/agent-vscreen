@@ -9,24 +9,19 @@ import android.net.ConnectivityManager
 import android.os.Build
 import com.kilon.agentvscreen.host.AppLogger
 import com.kilon.agentvscreen.host.ShizukuManager
-import com.kilon.agentvscreen.host.PowerOptimizationManager
 import com.kilon.agentvscreen.host.HostService
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * [vscreen] Keeps Minis' network alive while it is in the background.
+ * Keeps Agent-VScreen's network and process alive while it is in the background.
  *
- * This fork installs under its own package, so whatever the user once allowed for the
- * official Minis (battery optimisation exemption, background activity, background data)
- * does not apply to it. On Honor/Huawei and other OEM ROMs an app that is not exempt gets
- * its sockets cut a few seconds after it leaves the screen, even while its foreground
- * service runs: the model request then fails with "Software caused connection abort" or
- * "Failed to connect".
+ * On Honor/Huawei and other OEM ROMs an app that is not exempt gets its sockets cut a few seconds after it leaves the
+ * screen, even while its foreground service runs: a remote agent's request then fails with "Software caused connection
+ * abort" or "Failed to connect".
  *
- * [check] reads the system's view; [whitelist] uses Shizuku (uid 2000) to grant the same
- * exemptions a user would grant by hand. [ensureOnce] runs [whitelist] once per process as
- * soon as Shizuku is ready.
+ * [check] reads the system's view; [whitelist] uses Shizuku (uid 2000) to grant the same exemptions a user would grant
+ * by hand (called through host.Heal). [ensureOnce] runs it once per process as soon as Shizuku is ready.
  */
 internal object VScreenPower {
     private const val TAG = "VScreenPower"
@@ -65,7 +60,7 @@ internal object VScreenPower {
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
         val usm = ctx.getSystemService(UsageStatsManager::class.java)
         return Check(
-            batteryExempt = runCatching { PowerOptimizationManager.isIgnoringBatteryOptimizations(ctx) }.getOrDefault(true),
+            batteryExempt = runCatching { (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager).isIgnoringBatteryOptimizations(ctx.packageName) }.getOrDefault(true),
             backgroundRestricted = if (Build.VERSION.SDK_INT >= 28) runCatching { am?.isBackgroundRestricted == true }.getOrDefault(false) else false,
             dataSaver = runCatching { cm?.restrictBackgroundStatus ?: 0 }.getOrDefault(0),
             standbyBucket = if (Build.VERSION.SDK_INT >= 28) runCatching { usm?.appStandbyBucket ?: 0 }.getOrDefault(0) else 0,

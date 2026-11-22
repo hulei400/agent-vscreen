@@ -64,7 +64,7 @@ internal object CommandSpec {
         if (a.get("keep") != null || a.get("save") != null) return false
         val body = a.positional.joinToString(" ").trim()
         if (body.isEmpty()) return true
-        return runCatching { Steps.parseAll(body).all { it.kind == "wait" || it.kind == "sleep" } }.getOrDefault(false)
+        return runCatching { Steps.parseAll(body).all { it.kind == StepKind.WAIT || it.kind == StepKind.SLEEP } }.getOrDefault(false)
     }
 
     private val ASYNC = Opt("async", Kind.SWITCH, null, null,
@@ -78,15 +78,18 @@ internal object CommandSpec {
                 "Returns four blocks; [Done] also lists the notes, saved segments and before/after steps you kept for this app."),
             listOf(Opt("landscape", Kind.SWITCH, null, null, "副屏按横屏建", "build the screen in landscape"),
                 Opt("portrait", Kind.SWITCH, null, null, "副屏按竖屏建", "build the screen in portrait"),
-                Opt("restart", Kind.SWITCH, null, null, "冷启动（先结束应用）", "cold start (stops the app first)")),
+                Opt("restart", Kind.SWITCH, null, null, "冷启动（先结束应用）", "cold start (stops the app first)"),
+                Opt("asked", Kind.SWITCH, null, null, "用户正在主屏用这个应用时，已经问过用户并得到同意", "the user is using this app on the main screen and has agreed when asked")),
             long = true, sumZh = "打开应用并返回现在的画面", sumEn = "open an app and return the screen now"),
         Cmd("act", "[\"步骤; 步骤; …\"]", "[\"step; step; …\"]",
             listOf("做一段操作（最多 40 步，用 ; 或换行分开），返回四段。不带步骤 = 看一眼（等画面稳定，最多 3 秒）。",
                 "步骤：",
                 "  tap 目标 | press 目标 [时长，如 1.2s；纯数字是毫秒] | swipe x1 y1 x2 y2 [时长] | drag x1 y1 x2 y2 [x3 y3 …] [时长]",
-                "  scroll up|down|left|right [#N | x y] | type 文字 | type+ 文字（追加） | key 键名 | back | enter",
+                "  scroll up|down|left|right [#N | x y] | type 文字 | type+ 文字（追加） | type \"文字\" slow [200ms]（逐字输入） | key 键名 | key ctrl+a（组合键：ctrl/shift/alt + 键） | back | enter",
                 "  wait <条件> [or <条件>] [最长时长] | wait 2s | use 段名",
                 "  目标 = x y | #N（上次【现在】列表里的编号）| 画面上的字（先找完全一样的，再找包含的；只写一个数＝点画面上的这个数字）",
+                "  字里可写 *（任意字，整段字要对上：*蓝牙* 含蓝牙，共*条 以共开头以条结尾），text:/gone: 条件也一样；字@N = 从上往下第 N 处（@-1 最后一处）；字 +dx,+dy = 字旁边那一点（图标、开关）；坐标可写屏幕比例 50% 80%（换屏幕尺寸也点同一处）",
+                "  流程：try 一步 | try { 几步 }（没找到、没达到预期就跳过接着做）| if <条件> [最长] { … } [else { … } | else 一步]（看现在的画面，默认等 1.5s）| repeat 3 { … } | repeat [最多次数] { … } until <条件>（每轮后看，默认最多 10 次）。括号里可以换行、可以嵌套",
                 "  键名：back enter tab del space esc search menu up down left right paste copy cut page_up page_down，或数字 keycode（没有 home：副屏没有桌面）",
                 "每个动作后可加 until <条件> [or <条件>] [最长时长，默认 5s]；没写就等画面稳定（最多 3 秒；画面只剩循环小动画也算稳定）。",
                 "条件：text:字 | gone:字 | change[:x1,y1,x2,y2] | still[:区域]（完全不动）| stable（稳定，容许循环小动画）| color:x,y=#RRGGBB[~容差] | app:包名或界面名",
@@ -100,9 +103,11 @@ internal object CommandSpec {
             listOf("do a stretch of steps (up to 40, separated by ; or newlines), returns four blocks. No steps = take a look (waits for the picture to settle, up to 3 s).",
                 "steps:",
                 "  tap <target> | press <target> [duration, e.g. 1.2s; a bare number is ms] | swipe x1 y1 x2 y2 [duration] | drag x1 y1 x2 y2 [x3 y3 …] [duration]",
-                "  scroll up|down|left|right [#N | x y] | type <text> | type+ <text> (append) | key <name> | back | enter",
+                "  scroll up|down|left|right [#N | x y] | type <text> | type+ <text> (append) | type \"<text>\" slow [200ms] (one character at a time) | key <name> | key ctrl+a (shortcut: ctrl/shift/alt + key) | back | enter",
                 "  wait <condition> [or <condition>] [max duration] | wait 2s | use <segment>",
                 "  target = x y | #N (number in the last [Now] list) | text on the screen (exact match first, then contains; a single number = tap that number on the screen)",
+                "  words may hold * (any characters; the whole text must match: *Wi-Fi* holds Wi-Fi), in text:/gone: conditions too; words@N = the N-th place from the top (@-1 the last); words +dx,+dy = the point that far beside them (an icon, a switch); coordinates may be shares of the screen, 50% 80% (same place on any screen size)",
+                "  flow: try <step> | try { steps } (not found or not as expected: skip and go on) | if <condition> [max] { … } [else { … } | else <step>] (the screen as it is, waits up to 1.5 s by default) | repeat 3 { … } | repeat [at most] { … } until <condition> (checked after each round, at most 10 by default). Braces may span lines and nest",
                 "  keys: back enter tab del space esc search menu up down left right paste copy cut page_up page_down, or a numeric keycode (no home: the screen has no launcher)",
                 "After each action you may add until <condition> [or <condition>] [max duration, default 5s]; without it the picture is awaited to settle (up to 3 s; a picture left with only a small looping animation counts as settled).",
                 "conditions: text:<word> | gone:<word> | change[:x1,y1,x2,y2] | still[:region] (no motion at all) | stable (settled, small looping animation allowed) | color:x,y=#RRGGBB[~tolerance] | app:<package or screen name>",
@@ -117,6 +122,7 @@ internal object CommandSpec {
                 Opt("watch", Kind.DURATION, "时长", "duration", "步骤做完再看这么久（会动的画面）", "keep looking this long after the steps (moving pictures)"),
                 Opt("fast", Kind.SWITCH, null, null, "动作之间不等画面稳定（游戏、连续点击）；最后一步仍会等", "do not wait for the picture to settle between actions (games, rapid taps); the last step still waits"),
                 Opt("bare", Kind.SWITCH, null, null, "这一段不做这个应用记下的前置/收尾步骤", "this stretch skips the before/after steps kept for this app"),
+                Opt("human", Kind.SWITCH, null, null, "仿人节奏：每个动作前随机停 0.2–2.6 秒，点击在元素内略偏、按住和滑动的时长与位置有波动，打字分 1–3 个字一段（对节奏敏感的应用用；条件判断不变）。一直要就 note human on", "human pacing: a random 0.2–2.6 s pause before each action, taps slightly off-centre inside the element, varied hold and swipe lengths, typing 1–3 characters at a time (for apps sensitive to machine timing; conditions are unchanged). To keep it on: note human on"),
                 Opt("keep", Kind.VALUE, "notify|wake", "notify|wake", "本轮结束后继续盯 --stop 的条件，看到就通知用户（notify）或发一条事件给调用方（wake，用 events 取），然后结束；重启后还在", "after this turn keep watching the --stop condition; when seen, notify the user (notify) or send the caller an event (wake, fetched with events), then end; survives a restart"),
                 Opt("for", Kind.DURATION, "时长", "duration", "--keep 盯多久（默认 1 小时，最长 12 小时）", "how long --keep watches (default 1 hour, at most 12 hours)"),
                 Opt("save", Kind.VALUE, "名字", "name", "把这段步骤存成这个应用的段，以后 use 名字", "save these steps as a segment of this app, later: use <name>"),
@@ -126,13 +132,17 @@ internal object CommandSpec {
             sumEn = "run a stretch of steps on the screen (tap, swipe, type, wait) and return the screen now; no steps = look",
             scopeOf = { a -> if (looksOnly(a)) Scope.LOOK else Scope.OPERATE },
             scopeNoteZh = "不带步骤、或只有 wait 的 act 只需要 look", scopeNoteEn = "an act with no steps, or only wait steps, needs just look"),
-        Cmd("note", "[文字] | before \"<步骤>\" | after \"<步骤>\" | delete <编号|before|after|段名>", "[text] | before \"<steps>\" | after \"<steps>\" | delete <number|before|after|segment>",
+        Cmd("note", "[文字] | before \"<步骤>\" | after \"<步骤>\" | save <段名> \"<步骤>\" | show <段名> | human on|off | delete <编号|before|after|段名>", "[text] | before \"<steps>\" | after \"<steps>\" | save <segment> \"<steps>\" | show <segment> | human on|off | delete <number|before|after|segment>",
             listOf("给当前应用记笔记（不带参数 = 列出笔记、段和前置/收尾步骤）。下次 launch 会列出来，并标明是谁、在应用哪个版本时记的。",
                 "before / after：每段 act 开始前先做 before 的步骤，做完、观察完再做 after 的步骤（--bare 跳过）。",
-                "例：会自己走的画面（游戏、播放器）记 before = 继续的步骤、after = 暂停的步骤，你思考时画面就停着；每次进页面都弹的窗记 before = 关掉它的步骤。"),
+                "例：会自己走的画面（游戏、播放器）记 before = 继续的步骤、after = 暂停的步骤，你思考时画面就停着；每次进页面都弹的窗记 before = 关掉它的步骤。",
+                "save：不执行，直接存下或改写一个段（示教存的段也一样），步骤写法和 act 相同，可以用 try / if / repeat、* 和 @N；note 列出的就是段的完整步骤。",
+                "human on：这个应用以后每段 act 都用仿人节奏（同 act --human）；off 关掉。"),
             listOf("keep notes for the current app (no arguments = list notes, segments and before/after steps). The next launch lists them, with who wrote each and for which app version.",
                 "before / after: every act first does the before steps, and after acting and looking does the after steps (--bare skips them).",
-                "e.g. for a picture that moves by itself (a game, a player) keep before = the steps that resume and after = the steps that pause, so it stands still while you think; for a popup shown on every visit keep before = the steps that close it."),
+                "e.g. for a picture that moves by itself (a game, a player) keep before = the steps that resume and after = the steps that pause, so it stands still while you think; for a popup shown on every visit keep before = the steps that close it.",
+                "save: store or rewrite a segment without running it (taught lessons too); the steps are written as for act, with try / if / repeat, * and @N; note lists each segment's full steps.",
+                "human on: every act on this app uses human pacing from now on (as act --human); off turns it off."),
             sumZh = "给当前应用记笔记、前置/收尾步骤", sumEn = "keep notes and before/after steps for the current app"),
         Cmd("events", "", "",
             listOf("取盯守（act --keep wake）看到条件时发来的事件。事件有序号，取走后在你下一次 events 时才删除（中途断了不会丢）。",
@@ -141,6 +151,14 @@ internal object CommandSpec {
                 "Without a running --keep wake watch in this session it does not wait and says so."),
             listOf(Opt("wait", Kind.DURATION, "时长", "duration", "没有事件时最多等这么久（默认不等，最长 120s）", "wait up to this long when there is none (default no wait, at most 120s)"),
                 Opt("again", Kind.SWITCH, null, null, "把上一次取走的那批再给一遍", "return the previously fetched batch again")),
+            scope = Scope.LOOK, screen = false),
+        Cmd("trail", "", "",
+            listOf("用户接管操作时留下的轨迹：每条是时间 + 做了什么（按点到的控件叫名字）+ 当时在哪个页面 + 屏幕上有什么。没在录课时也记，最多留 200 条；不带参数默认取最后 20 条。",
+                "--last N 只取最后 N 条；--clear 清空轨迹。"),
+            listOf("the trail the user left while operating the screen: each line is time + what was done (named by the control it hit) + the page it was on + what the screen showed. Kept even when no lesson is recording, at most 200 entries; no argument takes the last 20.",
+                "--last N takes the last N entries; --clear empties the trail."),
+            listOf(Opt("last", Kind.VALUE, "条数", "count", "只取最后几条（默认 20，最多 200）", "take only the last N entries (default 20, at most 200)"),
+                Opt("clear", Kind.SWITCH, null, null, "清空轨迹", "empty the trail")),
             scope = Scope.LOOK, screen = false),
         Cmd("task", "[任务号] | cancel <任务号>", "[task id] | cancel <task id>",
             listOf("查看用 --async 开始的任务：不带参数列出本会话的任务；带任务号返回它的状态，做完了就是它的完整结果；cancel 让它在下一步之前停下。"),
@@ -170,6 +188,41 @@ internal object CommandSpec {
             listOf(Opt("note", Kind.VALUE, "说明", "text", "out 时给用户的通知里写什么", "what the notification to the user says on out")),
             scopeOf = { a -> if (a.positional.firstOrNull()?.lowercase() == "in") Scope.SYSTEM else Scope.OPERATE },
             scopeNoteZh = "in 需要 system", scopeNoteEn = "in needs system"),
+        // 1.4.0-beta13 (rainbow: agents can mute and unmute apps too, the same as the app's 应用静音 page).
+        Cmd("sound", "[list] | mute <应用> | unmute <应用> | plays <应用> on|off | screen on|off", "[list] | mute <app> | unmute <app> | plays <app> on|off | screen on|off",
+            listOf("应用静音：list 列出现在没声音的应用（谁静的）、手动静音的、在副屏里也出声的、副屏静音开没开；mute 让应用在所有屏幕上都不出声（直到 unmute）；unmute 恢复声音；plays 设这个应用在副屏里也出声；screen 开关副屏静音。已经在播放的声音要等应用重新播放才变。"),
+            listOf("app sound: list shows the apps silent now (and by whom), the ones muted by hand, the ones that keep sound on the screen, and whether screen muting is on; mute silences an app on every screen (until unmute); unmute gives its sound back; plays lets an app keep its sound on the screen; screen turns screen muting on or off. Sound already playing changes only when the app plays again."),
+            scope = Scope.SYSTEM, screen = false,
+            scopeOf = { a -> if ((a.positional.firstOrNull()?.lowercase() ?: "list") == "list") Scope.LOOK else Scope.SYSTEM },
+            scopeNoteZh = "list 只需 look", scopeNoteEn = "list needs look only"),
+        Cmd("ask", "\"<问题>\"", "\"<question>\"",
+            listOf("在手机上问用户（通知 + App 首页），等用户回答。默认 --point：用户在副屏的画面上点一下“你说的是哪个”，返回副屏坐标和那里的元素（#N）。说不清位置时用它，比文字描述准。",
+                "回答的是事实，不是许可：付款等仍按手机确认走。"),
+            listOf("ask the user on the phone (notification + the app's home page) and wait for the answer. Default --point: the user taps \"the one I mean\" on the screen's picture; you get the screen point and the element there (#N). Use it when a place is hard to put into words.",
+                "An answer is information, not permission: payments still need the phone's confirmation."),
+            listOf(Opt("point", Kind.SWITCH, null, null, "在画面上点一下（默认）", "tap once on the picture (default)"),
+                Opt("area", Kind.SWITCH, null, null, "在画面上框一块，返回框和框里的元素", "drag a box on the picture; returns the box and the elements in it"),
+                Opt("choose", Kind.VALUE, "甲|乙|丙", "A|B|C", "从 2–8 个选项里选一个", "choose one of 2–8 options"),
+                Opt("text", Kind.SWITCH, null, null, "写一句话回答", "answer with a line of text"),
+                Opt("wait", Kind.DURATION, "时长", "duration", "最多等多久（默认 50s，最长 5m；没答复是 ASK_PENDING，之后重发同一条 ask 取答案）", "how long to wait (default 50s, at most 5m; no answer is ASK_PENDING, send the same ask again later for the answer)")),
+            screen = false, long = true, sumZh = "在手机上问用户，让用户在副屏画面上点出你要找的东西", sumEn = "ask the user on the phone; the user can tap what you mean on the screen's picture"),
+        Cmd("teach", "\"<要演示什么>\"", "\"<what to show>\"",
+            listOf("请用户在副屏上亲手做一遍（示教）：手机上弹出请求，用户接管副屏操作、做完审阅，存成这个应用的一段。返回段名和步骤；之后 act \"use 段名 参数…\" 照做。用户输入的字默认变成参数 {1} {2}…，用的时候按顺序填。",
+                "适合说不清、反复失败、或用户自己更清楚怎么做的流程。先 launch 到要演示的应用，再把页面整理回起始的样子（清掉自己输入的字、计算结果、弹窗），看一眼确认再发。"),
+            listOf("ask the user to do it once on the background screen (a lesson): a request appears on the phone, the user takes over the screen, does it, reviews it, and it is saved as a segment of the app. Returns the segment name and steps; then act \"use <name> <values>…\" runs it. Words the user typed become blanks {1} {2}… by default, filled in order when used.",
+                "For flows that are hard to describe, keep failing, or the user knows better. launch the app to show first, put the page back where it starts (clear words you typed, a result, a dialog) and look once to check before sending."),
+            listOf(Opt("name", Kind.VALUE, "名字", "name", "建议的段名（用户可以改）", "suggested segment name (the user may change it)"),
+                Opt("wait", Kind.DURATION, "时长", "duration", "最多等多久（默认 50s，最长 5m；没做完是 ASK_PENDING，之后重发同一条 teach 取结果）", "how long to wait (default 50s, at most 5m; not done yet is ASK_PENDING, send the same teach again later for the result)"),
+                Opt("again", Kind.SWITCH, null, null, "请用户重新演示一遍（不加时，同一条 teach 已有结果就原样返回，不会再问用户）", "ask the user to show it again (without it, a teach that already has a result returns that result and does not ask again)")),
+            screen = false, long = true, sumZh = "请用户在副屏上亲手演示一遍，存成可重放的一段", sumEn = "ask the user to show it once on the screen; saved as a segment you can replay"),
+        Cmd("schedule", "[\"时间\"] | off <名字|all>", "[\"when\"] | off <name|all>",
+            listOf("预约你会来用手机的时间（定时任务用）：每个窗口开始前 3 分钟拉起服务、检查 Shizuku 和连接，没准备好就通知用户，结果作为事件发给本会话。不带参数列出预约和现在是否就绪。",
+                "时间写法：\"07:00\"、\"07:00,19:30\"、\"weekdays 08:30\"、\"mon,wed,fri 21:00\"、\"every 2h from 08:00 to 22:00\"（间隔至少 30 分钟，最多 8 条）。"),
+            listOf("book the times you will use the phone (for timed tasks): 3 minutes before each window the service is started and Shizuku and the connection are checked; the user is notified if it is not ready, and the result is sent to this session as an event. With no argument: the schedules and whether it is ready now.",
+                "Times: \"07:00\", \"07:00,19:30\", \"weekdays 08:30\", \"mon,wed,fri 21:00\", \"every 2h from 08:00 to 22:00\" (at least 30 minutes apart, at most 8 entries)."),
+            listOf(Opt("name", Kind.VALUE, "名字", "name", "预约的名字（同名会替换；默认 w1、w2…）", "the schedule's name (the same name replaces it; default w1, w2…)"),
+                Opt("for", Kind.DURATION, "时长", "duration", "每个窗口保持多久（默认 10m，最长 30m）", "how long each window stays up (default 10m, at most 30m)")),
+            screen = false, sumZh = "预约定时任务要用手机的时间，到点前拉起并检查", sumEn = "book when a timed task will use the phone; it is started and checked before each time"),
         Cmd("status", "", "",
             listOf("后台操作是否可用、副屏、权限、应用限制、正在盯守的条件、排队中的命令。"),
             listOf("whether background operation works, the screen, permissions, app rules, watches running, commands in the queue."),
@@ -178,16 +231,26 @@ internal object CommandSpec {
         Cmd("spots", "[x1,y1,x2,y2]", "[x1,y1,x2,y2]",
             listOf("本地按颜色找色块（不调模型），列出中心坐标和标注图。"), listOf("find color spots locally (no model), listing centers and a marked picture."),
             listOf(Opt("color", Kind.VALUE, "#RRGGBB", "#RRGGBB", "只找这种颜色", "only this color")), scope = Scope.LOOK),
+        Cmd("look", "[x1,y1,x2,y2]", "[x1,y1,x2,y2]",
+            listOf("主动要图：不带参数是现在的画面；带区域是放大那一块；带 --last/--from/--count 是回看录像（每个动作前一张、圈出点的位置）。可以要更清楚、换排法、关掉标注、翻页。每次最多 8 张图、合计约 3 MB，多的用 --page 翻。"),
+            listOf("ask for pictures: no argument is the screen now; a region zooms into it; --last/--from/--count looks back at the recording (one frame before each action, touches circled). Ask for more detail, another layout, no marks, or the next page. At most 8 pictures, about 3 MB a reply; --page for more."),
+            lookOpts(), scope = Scope.LOOK),
+        Cmd("frames", "", "",
+            listOf("look --last … 的旧写法：回看录像，默认是上一次返回的【这段时间】。"),
+            listOf("old form of look --last …: look back at the recording, by default the [Meanwhile] of the last reply."),
+            lookOpts(), scope = Scope.LOOK),
         Cmd("zoom", "x1,y1,x2,y2", "x1,y1,x2,y2",
-            listOf("放大看一块区域（图边上标着副屏坐标）。"), listOf("zoom into a region (screen coordinates on the picture's edges)."),
-            listOf(Opt("scale", Kind.VALUE, "倍数", "factor", "放大倍数（默认按区域大小定）", "zoom factor (default follows the region size)")), scope = Scope.LOOK),
+            listOf("look x1,y1,x2,y2 的旧写法：放大看一块区域（图边上标着副屏坐标）。"), listOf("old form of look x1,y1,x2,y2: zoom into a region (screen coordinates on the picture's edges)."),
+            listOf(Opt("scale", Kind.VALUE, "倍数", "factor", "放大倍数（默认按区域大小定）", "zoom factor (default follows the region size)"),
+                detailOpt, marksOpt), scope = Scope.LOOK),
         Cmd("collect", "", "",
-            listOf("从当前位置往下一页页滚，收集每一行文字（去重）。"), listOf("scroll down page by page from here and collect every line of text (deduplicated)."),
+            listOf("从当前位置往下一页页滚，收集每一条（一张卡片或一行列表算一条，去重）。上面还有内容时会说；--from-top 先回到顶部。"), listOf("scroll down page by page from here and collect every item (a card or list row is one item, deduplicated). Says when there is more above; --from-top goes to the top first."),
             listOf(Opt("pages", Kind.VALUE, "页数", "count", "最多翻几页（默认 8，最多 40）", "pages to go through at most (default 8, at most 40)"),
+                Opt("from-top", Kind.SWITCH, null, null, "先滚回页面顶部再开始收集", "scroll back to the top of the page before collecting"),
                 Opt("until", Kind.VALUE, "文字", "text", "看到这段文字就停", "stop when this text is seen")), long = true),
         Cmd("fix", "[code]", "[code]",
-            listOf("修复 status 里列出的问题。会改系统设置或在主屏打开设置页的步骤：手机上会请用户确认。"),
-            listOf("fix the problems listed in status. Steps that change system settings or open a settings page on the main screen: the phone asks the user to confirm."),
+            listOf("修复 status 里列出的问题，并把被留下静音的应用恢复声音；每项修完再检查一遍，fixed 是检查的结果。会改系统设置或在主屏打开设置页的步骤：手机上会请用户确认。"),
+            listOf("fix the problems listed in status and give sound back to apps left silent; each is checked again afterwards and fixed is that check. Steps that change system settings or open a settings page on the main screen: the phone asks the user to confirm."),
             listOf(Opt("open", Kind.SWITCH, null, null, "需要用户手动处理时，在主屏打开对应页面", "when the user must act by hand, open the page on the main screen")), scope = Scope.SYSTEM, screen = false),
         Cmd("diag", "", "",
             listOf("导出一份诊断（版本、状态、最近的日志和被吞掉的异常；不含你输入的文字和截图），返回文本，出问题时交给开发者。"),
@@ -286,37 +349,34 @@ internal object CommandSpec {
     }
 
     /** `help` (short). */
-    fun quickHelp(): String = tr(
-        "vscreen — Agent-VScreen：在看不见的副屏里操作应用，不占用户主屏（完整说明：help all；单条：help act；代码表：help codes）\n" +
-            "  launch 应用名            打开应用，返回四段（做了什么 / 这段时间 / 现在 / 注意）\n" +
-            "  act \"步骤; 步骤; …\"      做一段操作，返回四段；act 不带步骤 = 看一眼\n" +
-            "        步骤：tap 目标 | press 目标 | swipe x1 y1 x2 y2 | drag x1 y1 x2 y2 … | scroll down | type 文字 | key back | wait 条件 | use 段名\n" +
-            "        目标：x y | #N（【现在】列表的编号）| 画面上的字；动作后可加 until 条件（text:字 gone:字 change still stable color:x,y=#RRGGBB app:名）\n" +
-            "        --stop 条件  --watch 2s  --fast  --bare  --keep notify|wake  --save 段名  --async\n" +
-            "  note [文字] | note before|after \"步骤\" | note delete 编号\n" +
-            "  keep | keep off 名字      查看 / 停止本轮之后的盯守\n" +
-            "  events [--wait 30s]       取盯守（--keep wake）发来的事件\n" +
-            "  task [任务号]             查看 --async 开始的任务\n" +
-            "  title 文字 | done         告诉用户你在做什么（悬浮窗上显示）| 这一轮做完了（副屏让出，页面保留）\n" +
-            "  stop | release | handoff in|out | status | apps 关键词 | spots | zoom 区域 | collect | fix | diag\n" +
-            "成功与否看退出码 / ok：0 整段按预期做完；1 停在某一步或被拒绝（【注意】里的代码说明原因，help codes 查怎么办）；2 命令写错。\n" +
+    /** Commands kept only as old forms of another (listed once, at the end of the quick help). */
+    private val OLD_FORMS = mapOf("zoom" to "look x1,y1,x2,y2", "frames" to "look --last …")
+
+    /**
+     * `help` (short). 1.4.0-beta2: generated from the command table and the step / condition kinds, so a new command,
+     * option, step or condition is in it without anyone remembering to add a line.
+     */
+    fun quickHelp(): String = buildString {
+        append(tr("vscreen — Agent-VScreen：在看不见的副屏里操作应用，不占用户主屏（完整说明：help all；单条：help act；代码表：help codes）",
+            "vscreen — Agent-VScreen: operate apps on an invisible background screen without taking the user's screen (full guide: help all; one command: help act; codes: help codes)")).append('\n')
+        for (c in commands) {
+            if (c.name in OLD_FORMS) continue
+            val use = (c.name + " " + c.positional).trim()
+            append("  ").append(use.padEnd(24)).append("  ").append(c.summary.substringBefore(tr("。", ". ")).trimEnd('.', '。')).append('\n')
+            if (c.name == "act") {
+                append(tr("        步骤：", "        steps: ")).append(Steps.STEPS_HELP).append('\n')
+                append(tr("        目标：x y | #N（【现在】列表的编号）| 画面上的字；动作后可加 until 条件：", "        target: x y | #N (number in the [Now] list) | text on the screen; after an action add until <condition>: ")).append(Steps.CONDS_HELP).append('\n')
+                append("        ").append(c.allOpts.filter { !it.deprecated }.joinToString("  ") { it.usage() }).append('\n')
+            }
+        }
+        append(tr("  旧写法：", "  old forms: ")).append(OLD_FORMS.entries.joinToString(tr("；", "; ")) { "${it.key} = ${it.value}" }).append('\n')
+        append(tr("成功与否看退出码 / ok：0 整段按预期做完；1 停在某一步或被拒绝（【注意】里的代码说明原因，help codes 查怎么办）；2 命令写错。\n" +
             "一步没达到预期（until 没等到、字没输进去、找不到或有歧义）这段就停在那一步，后面的不做，【注意】里写明现在的画面。\n" +
             "输出很长时完整结果也存在截图目录的 last.txt（路径见 help all），可以用 head / sed 分段看。",
-        "vscreen — Agent-VScreen: operate apps on an invisible background screen without taking the user's screen (full guide: help all; one command: help act; codes: help codes)\n" +
-            "  launch <app>              open an app, returns four blocks (Done / Meanwhile / Now / Notes)\n" +
-            "  act \"step; step; …\"       do a stretch of steps, returns four blocks; act with no steps = take a look\n" +
-            "        steps: tap <target> | press <target> | swipe x1 y1 x2 y2 | drag x1 y1 x2 y2 … | scroll down | type <text> | key back | wait <condition> | use <segment>\n" +
-            "        target: x y | #N (number in the [Now] list) | text on the screen; after an action add until <condition> (text:word gone:word change still stable color:x,y=#RRGGBB app:name)\n" +
-            "        --stop <condition>  --watch 2s  --fast  --bare  --keep notify|wake  --save <segment>  --async\n" +
-            "  note [text] | note before|after \"steps\" | note delete <number>\n" +
-            "  keep | keep off <name>    list / stop watches that run after this turn\n" +
-            "  events [--wait 30s]       fetch events sent by watches (--keep wake)\n" +
-            "  task [id]                 look at tasks started with --async\n" +
-            "  title <text> | done       tell the user what you are doing (shown on the floating window) | this turn is finished (screen freed, page kept)\n" +
-            "  stop | release | handoff in|out | status | apps <keyword> | spots | zoom <region> | collect | fix | diag\n" +
             "Success is in the exit code / ok: 0 the whole stretch went as expected; 1 it stopped at a step or was refused (the code in [Notes] says why, help codes says what to do); 2 the command was written wrong.\n" +
             "If a step does not reach what it expects (until never came, text was not typed in, not found or ambiguous), the stretch stops at that step, skips the rest, and [Notes] describes the screen now.\n" +
-            "When output is long, the full result is also saved as last.txt in the screenshot folder (path in help all); read it in parts with head / sed.")
+            "When output is long, the full result is also saved as last.txt in the screenshot folder (path in help all); read it in parts with head / sed."))
+    }
 
     /** `help <command>`; null when there is no such command. */
     fun helpFor(name: String): String? = of(name)?.help()?.joinToString("\n")
@@ -350,9 +410,24 @@ internal object CommandSpec {
     }
 
     /** The argv of a structured call (MCP typed tool / HTTP `{"command":"act","args":…,"options":{…}}`). */
+    private fun singleTextArg(s: String): String {
+        val t = s.trim()
+        if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"') && '"' !in t.substring(1, t.length - 1)) ||
+                (t.startsWith('\'') && t.endsWith('\'') && '\'' !in t.substring(1, t.length - 1)))) {
+            return t.substring(1, t.length - 1)
+        }
+        return t
+    }
+
     fun argvOf(c: Cmd, args: String?, options: JSONObject?): List<String> {
         val out = arrayListOf(c.name)
-        args?.takeIf { it.isNotBlank() }?.let { a -> if (c.name == "act" || c.name == "title" || c.name == "launch") out += a else out += com.kilon.agentvscreen.api.ApiServer.splitCommand(a) }
+        args?.takeIf { it.isNotBlank() }?.let { a ->
+            when (c.name) {
+                "act", "title", "launch" -> out += a
+                "ask", "teach" -> out += singleTextArg(a)
+                else -> out += com.kilon.agentvscreen.api.ApiServer.splitCommand(a)
+            }
+        }
         if (options != null) for (o in c.allOpts) {
             val k = listOf(o.name, o.name.replace('-', '_')).firstOrNull { options.has(it) } ?: continue
             if (o.kind == Kind.SWITCH) { if (options.optBoolean(k, false)) out += "--${o.name}" }
@@ -361,3 +436,18 @@ internal object CommandSpec {
         return out
     }
 }
+
+
+private val detailOpt = CommandSpec.Opt("detail", CommandSpec.Kind.VALUE, "清晰度", "detail", "low、normal（默认）或 high", "low, normal (default) or high")
+private val marksOpt = CommandSpec.Opt("marks", CommandSpec.Kind.VALUE, "on|off", "on|off", "图上的标尺和点击圈（默认 on）", "ruler and touch circles on the picture (default on)")
+private fun lookOpts() = listOf(
+    CommandSpec.Opt("last", CommandSpec.Kind.DURATION, "时长", "duration", "最近这么久（如 30s、2m）", "this long up to now (e.g. 30s, 2m)"),
+    CommandSpec.Opt("from", CommandSpec.Kind.VALUE, "时间", "time", "从多久以前（20s）或钟点（14:03:10）开始", "start this long ago (20s) or at a clock time (14:03:10)"),
+    CommandSpec.Opt("to", CommandSpec.Kind.VALUE, "时间", "time", "到多久以前或钟点为止（默认现在）", "end this long ago or at a clock time (default now)"),
+    CommandSpec.Opt("count", CommandSpec.Kind.VALUE, "张数", "count", "最多几帧（默认 12，最多 96）", "at most this many frames (default 12, at most 96)"),
+    CommandSpec.Opt("every", CommandSpec.Kind.DURATION, "间隔", "interval", "按固定间隔取（如 0.5s），和上一张一样的不重复", "take one every interval (e.g. 0.5s), repeats left out"),
+    CommandSpec.Opt("page", CommandSpec.Kind.VALUE, "页", "page", "超过 8 张图时看第几页", "which page when there are more than 8 pictures"),
+    detailOpt,
+    CommandSpec.Opt("layout", CommandSpec.Kind.VALUE, "排法", "layout", "auto（默认）、single（一帧一张）、strip（一行 6 帧）或 3x4", "auto (default), single (one frame each), strip (6 in a row) or 3x4"),
+    marksOpt,
+    CommandSpec.Opt("big", CommandSpec.Kind.SWITCH, null, null, "同 --detail high", "same as --detail high", deprecated = true))

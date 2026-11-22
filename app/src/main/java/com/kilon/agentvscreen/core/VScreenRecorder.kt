@@ -8,7 +8,6 @@ import com.kilon.agentvscreen.host.AppLogger
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
 import kotlin.math.roundToInt
 
 /**
@@ -81,7 +80,7 @@ object VScreenRecorder {
             val k = MAX_SIDE.toDouble() / maxOf(frame.width, frame.height)
             val small = if (k >= 1.0) frame else Bitmap.createScaledBitmap(frame, maxOf(1, (frame.width * k).roundToInt()), maxOf(1, (frame.height * k).roundToInt()), true)
             val f = File(t.dir, "$now.jpg")
-            FileOutputStream(f).use { small.compress(Bitmap.CompressFormat.JPEG, 60, it) }
+            Pictures.write(small, f, Pictures.Use.RECORDING, fit = false)
             if (small !== frame) small.recycle()
             synchronized(t) {
                 t.frames.addLast(Frame(now, f, f.length())); t.bytes += f.length()
@@ -138,8 +137,6 @@ object VScreenRecorder {
         synchronized(t) { t.marks.filter { it.atMs in fromMs..toMs } }
     }.orEmpty()
 
-    fun actionMark(displayId: Int, n: Int): Mark? = existing(displayId)?.let { t -> synchronized(t) { t.marks.lastOrNull { (it.kind == "action" || it.kind == "read") && it.n == n } } }
-
     /** v44: the points of action [n] (known only once the command has finished: where it tapped / dragged). */
     fun setPoints(displayId: Int, n: Int, pts: List<IntArray>) {
         val t = existing(displayId) ?: return
@@ -175,7 +172,7 @@ object VScreenRecorder {
             o.put("recording", true).put("full", t.on).put("frames", t.frames.size)
                 .put("seconds", t.frames.firstOrNull()?.let { ((System.currentTimeMillis() - it.atMs) / 1000) } ?: 0)
                 .put("mb", ((t.bytes / 1024.0 / 1024.0) * 10).roundToInt() / 10.0)
-                .put("note", if (t.on) tr("后台录屏：最近 3 分钟全速、3–10 分钟每秒一帧（rewind 查看）", "Background recording: the last 3 minutes at full rate, 3–10 minutes at one frame a second (see with rewind)") else tr("录屏关着：只留最近 15 秒给 film / 暂停核对", "Recording off: only the last 15 s are kept for film / pause checks"))
+                .put("note", if (t.on) tr("后台录屏：最近 3 分钟全速、3–10 分钟每秒一帧（vscreen look --last 30s 查看）", "Background recording: the last 3 minutes at full rate, 3–10 minutes at one frame a second (see with vscreen look --last 30s)") else tr("录屏关着：只留最近 15 秒给 film / 暂停核对", "Recording off: only the last 15 s are kept for film / pause checks"))
         }
     }
 

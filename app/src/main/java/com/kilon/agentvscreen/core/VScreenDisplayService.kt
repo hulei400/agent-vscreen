@@ -63,9 +63,9 @@ import com.kilon.agentvscreen.host.AppLogger
  *                op 1 SET     in: ratio                      out: status, returnCode, readBack
  *                op 2 RESTORE in: hadEntry, entryBytes, ratio out: status, readBack, hasEntryNow, detail
  *
- * The service runs as a Shizuku daemon: when the Minis process dies (killed
+ * The service runs as a Shizuku daemon: when the app process dies (killed
  * in the background, or restarted) its displays survive with the apps on
- * them, and the next Minis process adopts them (LIST + SET_SURFACE with a
+ * them, and the next app process adopts them (LIST + SET_SURFACE with a
  * fresh ImageReader). Displays nobody touched for [ORPHAN_MS] are released.
  * Input is injected with the target display id set on every event, from
  * the shell uid (INJECT_EVENTS), the way scrcpy does it.
@@ -101,6 +101,7 @@ class VScreenDisplayService : Binder {
                     removed.first?.let { runCatching { it.release() } }
                     removed.second?.let { runCatching { if (it.isHeld) it.release() } }
                 }
+                if (stale.isNotEmpty()) sound.check()
             }
         }.apply { isDaemon = true; name = "vscreen-reaper" }.start()
     }
@@ -142,6 +143,127 @@ class VScreenDisplayService : Binder {
     constructor() : super() { base = null }
     constructor(context: Context) : super() { base = context }
 
+    /**
+     * 1.4.0-beta11: the sound of apps on the background screen is owned HERE, not by the app (rainbow 2026-11-17: after
+     * an uninstall or an abnormal exit, apps used on the background screen stayed silent and needed a command).
+     *
+     * Muting is a system setting (PLAY_AUDIO app-op) that outlives whoever set it. When the app owned it, giving the
+     * sound back needed the app to run again: an uninstall, a kill, or a reboot left apps silent for good. This service
+     * runs as the shell beside the screens themselves, survives the app, and gives an app its sound back the moment it
+     * is no longer on one of our screens or comes to the front of the main screen: screen released or reaped, the app
+     * moved away, the app process gone, the app uninstalled ([DESTROY_CODE] from Shizuku, and a package check), and on
+     * the next service start for anything a killed service left behind ([Sound.FILE]).
+     */
+    private val sound = Sound()
+
+    private inner class Sound {
+        private val muted = LinkedHashMap<String, String>()
+        @Volatile private var watching = false
+        private var checks = 0
+
+        init {
+            // Whatever a killed service left silent: no screen exists in a fresh process, so all of it goes back.
+            runCatching { java.io.File(FILE).takeIf { it.isFile }?.readText() }.getOrNull()?.let { t ->
+                runCatching { org.json.JSONObject(t).let { o -> o.keys().forEach { k -> muted[k] = o.optString(k, "default") } } }
+            }
+            if (muted.isNotEmpty()) Thread { giveAll(); if (list().isNotEmpty()) watch() }.apply { isDaemon = true; name = "vscreen-sound-leftover" }.start()
+        }
+
+        private fun save() {
+            runCatching {
+                val f = java.io.File(FILE)
+                if (muted.isEmpty()) f.delete()
+                else f.writeText(org.json.JSONObject().apply { muted.forEach { (k, v) -> put(k, v) } }.toString())
+            }
+        }
+
+        /**
+         * 1 = silenced now, 2 = already ours, 3 = silenced but a player of it is still heard (the system re-checks only
+         * when the app plays again), 0 = left alone (unreadable, refused, or silent by someone else's choice).
+         *
+         * 1.4.0-beta13 (rainbow: on vivo a package-level ignore did not silence): where an app has a UID record the
+         * system checks THAT one and the package's ignore does nothing. So both records are set to ignore (the UID's
+         * only when the uid is the app's alone, never a shared one), read back, and given back together as allow.
+         */
+        fun mute(pkg: String): Int = synchronized(muted) {
+            if (pkg.isBlank()) return 0
+            if (pkg in muted) return 2
+            val now = runCatching { PlayAudio.parse(sh("cmd", "appops", "get", pkg, "PLAY_AUDIO")) }.getOrNull() ?: return 0
+            if (PlayAudio.silent(now)) return 0
+            val uid = uidOf(pkg)?.takeIf { u -> u >= 10_000 && runCatching { sh("cmd", "package", "list", "packages", "--uid", "$u").lines().count { it.startsWith("package:") } == 1 }.getOrDefault(false) }
+            val out = runCatching { sh("sh", "-c", PlayAudio.silence(0, pkg, uid)) }.getOrDefault("")
+            val after = PlayAudio.parseScan(out).firstOrNull()?.modes
+            if (after == null || after.pkg != "ignore" || (uid != null && after.uid != null && after.uid != "ignore")) {
+                // Refused or not taken: put back what we may have set, keep nothing.
+                runCatching { sh("sh", "-c", PlayAudio.giveBack(0, pkg, uid)) }
+                return 0
+            }
+            muted[pkg] = now.pkg ?: "default"; save(); watch()
+            runCatching { Thread.sleep(300); PlayAudio.audible(sh("dumpsys", "audio"), uid ?: uidOf(pkg) ?: -1) }.getOrNull()?.let { if (it) return 3 }
+            1
+        }
+
+        private fun uidOf(pkg: String): Int? = runCatching {
+            sh("cmd", "package", "list", "packages", "-U", pkg).lines().firstOrNull { it.trim().startsWith("package:$pkg ") || it.trim() == "package:$pkg" }
+                ?.let { Regex("uid:(\\d+)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+        }.getOrNull()
+
+        /**
+         * 1.4.0-beta13 (rainbow: the sound did not come back): back to `allow` on BOTH records, then read both. Some ROMs
+         * treat an explicit `default` as muted, so `default` is never written; nothing but an app that played before
+         * is muted, so `allow` is what it had in effect.
+         */
+        fun give(pkg: String) = synchronized(muted) {
+            if (pkg !in muted) return
+            val ok = runCatching {
+                val uid = uidOf(pkg)
+                val out = sh("sh", "-c", PlayAudio.giveBack(0, pkg, uid))
+                PlayAudio.parseScan(out).firstOrNull()?.let { !PlayAudio.silent(it.modes) } ?: false
+            }.getOrDefault(false)
+            if (ok || !installed(pkg)) muted.remove(pkg)
+            save()
+        }
+
+        fun giveAll() = synchronized(muted) { muted.keys.toList().forEach { give(it) } }
+
+        fun list(): List<String> = synchronized(muted) { muted.keys.toList() }
+
+        /** Give back every app that is no longer on one of our screens, or is in front on the main screen. */
+        fun check() = synchronized(muted) {
+            if (muted.isEmpty()) return
+            if (++checks % 4 == 0 && !installed(com.kilon.agentvscreen.BuildConfig.APPLICATION_ID)) { giveAll(); return }
+            val ours = synchronized(displays) { displays.keys.toSet() }
+            val roots = runCatching { rootTasks() }.getOrNull() ?: return
+            fun pkgs(r: Root) = (r.children.mapNotNull { it.second } + listOfNotNull(r.top)).map { it.substringBefore('/') }
+            val here = roots.filter { it.displayId in ours }.flatMap { pkgs(it) }.toSet()
+            val front = roots.firstOrNull { it.displayId == 0 && it.visible && it.type == 1 }?.top?.substringBefore('/')
+            muted.keys.filter { it !in here || it == front }.forEach { give(it) }
+        }
+
+        private fun watch() {
+            if (watching) return
+            watching = true
+            Thread {
+                while (true) {
+                    runCatching { Thread.sleep(3_000) }
+                    runCatching { check() }
+                }
+            }.apply { isDaemon = true; name = "vscreen-sound" }.start()
+        }
+
+        private fun installed(pkg: String): Boolean =
+            runCatching { sh("cmd", "package", "path", pkg).contains("package:") }.getOrDefault(true)
+
+        private fun sh(vararg cmd: String): String {
+            val p = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+            val out = StringBuilder()
+            val reader = Thread { runCatching { p.inputStream.bufferedReader().use { out.append(it.readText()) } } }.apply { isDaemon = true; start() }
+            if (!p.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)) { p.destroyForcibly(); error("timeout: ${cmd.joinToString(" ")}") }
+            reader.join(1_000)
+            return synchronized(out) { out.toString() }
+        }
+    }
+
     override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
         if (code == DESTROY_CODE) {
             synchronized(displays) {
@@ -149,10 +271,11 @@ class VScreenDisplayService : Binder {
                 screenLocks.values.forEach { runCatching { if (it.isHeld) it.release() } }; screenLocks.clear()
                 lockWanted.clear()
             }
+            sound.giveAll() // uninstall, update, Shizuku stopping the service: no app is left silent
             System.exit(0)
             return true
         }
-        if (code !in CREATE..INJECT_TEXT) return super.onTransact(code, data, reply, flags)
+        if (code !in CREATE..INJECT_COMBO) return super.onTransact(code, data, reply, flags)
         data.enforceInterface(DESCRIPTOR)
         val out = reply ?: return true
         try {
@@ -178,12 +301,26 @@ class VScreenDisplayService : Binder {
                     val id = data.readInt()
                     releaseScreenLock(id)
                     synchronized(displays) { meta.remove(id); touched.remove(id); lockWanted.remove(id); displays.remove(id) }?.let { runCatching { it.release() } }
+                    sound.check()
                     out.writeInt(0)
+                }
+                SOUND -> {
+                    when (data.readInt()) {
+                        0 -> { val p = data.readString().orEmpty(); out.writeInt(0); out.writeInt(sound.mute(p)) }
+                        1 -> { sound.give(data.readString().orEmpty()); out.writeInt(0) }
+                        3 -> { sound.giveAll(); out.writeInt(0) }
+                        else -> { val l = sound.list(); out.writeInt(0); out.writeInt(l.size); l.forEach { out.writeString(it) } }
+                    }
                 }
                 PING -> { out.writeInt(0); out.writeInt(android.os.Process.myUid()) }
                 INJECT_KEY -> {
                     val id = data.readInt(); val key = data.readInt(); val longPress = data.readInt() != 0
                     out.writeInt(0); out.writeInt(if (injectKey(id, key, longPress)) 1 else 0)
+                }
+                INJECT_COMBO -> {
+                    val id = data.readInt(); val key = data.readInt(); val n = data.readInt()
+                    val mods = IntArray(n) { data.readInt() }
+                    out.writeInt(0); out.writeInt(if (injectCombo(id, key, mods)) 1 else 0)
                 }
                 INJECT_TEXT -> {
                     val id = data.readInt(); val text = data.readString().orEmpty()
@@ -410,6 +547,30 @@ class VScreenDisplayService : Binder {
     }
 
     /**
+     * 1.4.0-beta13 (rainbow: agents use keyboard shortcuts): a key with modifiers, the way a hardware keyboard sends it:
+     * each modifier goes down (the meta state growing with it), the key goes down and up with the full meta state,
+     * then the modifiers come up in reverse. Apps that read the meta state of the key and apps that track the
+     * modifier keys themselves both see Ctrl+A.
+     */
+    private fun injectCombo(displayId: Int, code: Int, mods: IntArray): Boolean {
+        fun metaOf(m: Int) = when (m) {
+            KeyEvent.KEYCODE_CTRL_LEFT -> KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+            KeyEvent.KEYCODE_SHIFT_LEFT -> KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+            KeyEvent.KEYCODE_ALT_LEFT -> KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON
+            else -> 0
+        }
+        val now = SystemClock.uptimeMillis()
+        fun ev(action: Int, k: Int, meta: Int) = KeyEvent(now, SystemClock.uptimeMillis(), action, k, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+        var meta = 0
+        var ok = true
+        for (m in mods) { meta = meta or metaOf(m); ok = inject(ev(KeyEvent.ACTION_DOWN, m, meta), displayId) && ok }
+        ok = inject(ev(KeyEvent.ACTION_DOWN, code, meta), displayId) && ok
+        ok = inject(ev(KeyEvent.ACTION_UP, code, meta), displayId) && ok
+        for (m in mods.reversed()) { meta = meta and metaOf(m).inv(); ok = inject(ev(KeyEvent.ACTION_UP, m, meta), displayId, if (m == mods.first()) 1 else 0) && ok }
+        return ok
+    }
+
+    /**
      * 1.2: characters as key events on [displayId], the way the system's own `input text` makes them (the virtual
      * keyboard's character map), but sent from here with the display id set. False when a character has no key.
      */
@@ -558,7 +719,7 @@ class VScreenDisplayService : Binder {
         return ok
     }
 
-    /** A finger nobody moved for [FINGER_MAX_IDLE_MS] is lifted, so a dead Minis never leaves a finger down. */
+    /** A finger nobody moved for [FINGER_MAX_IDLE_MS] is lifted, so a dead app never leaves a finger down. */
     private fun startFingerWatch() {
         if (fingerWatch) return
         fingerWatch = true
@@ -620,21 +781,17 @@ class VScreenDisplayService : Binder {
 
     /** Remove one task (the background screen's own copy of an app) without killing the app. */
     private fun removeTask(taskId: Int): Boolean {
-        val atm = runCatching {
-            Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
-        }.getOrNull() ?: Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null)
-        val m = atm!!.javaClass.getMethod("removeTask", Int::class.javaPrimitiveType)
+        val atm = atmService()
+        val m = atm.javaClass.getMethod("removeTask", Int::class.javaPrimitiveType)
         return m.invoke(atm, taskId) as Boolean
     }
 
     /** v22: move a whole task (its root task) to another display, as it is. */
     private fun moveTask(taskId: Int, displayId: Int) {
-        val atm = runCatching {
-            Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
-        }.getOrNull() ?: Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null)
+        val atm = atmService()
         val ip = Int::class.javaPrimitiveType
-        val m = runCatching { atm!!.javaClass.getMethod("moveRootTaskToDisplay", ip, ip) }.getOrNull()
-            ?: atm!!.javaClass.getMethod("moveStackToDisplay", ip, ip)
+        val m = runCatching { atm.javaClass.getMethod("moveRootTaskToDisplay", ip, ip) }.getOrNull()
+            ?: atm.javaClass.getMethod("moveStackToDisplay", ip, ip)
         // On some ROMs (vivo) an app task sits inside another root task: the system only knows the root's id.
         val root = runCatching { rootIdOf(taskId) }.getOrNull()
         val ids = listOfNotNull(root, taskId).distinct()
@@ -727,12 +884,22 @@ class VScreenDisplayService : Binder {
         const val FOCUS_TASK = FIRST_CALL_TRANSACTION + 16
         /** 1.2 (protocol 10). */
         const val INJECT_TEXT = FIRST_CALL_TRANSACTION + 17
+        /** 1.4.0-beta11 (protocol 11): op 0 MUTE pkg -> 0/1/2, op 1 GIVE pkg, op 2 LIST -> n, n x pkg, op 3 GIVE_ALL. */
+        const val SOUND = FIRST_CALL_TRANSACTION + 18
+        /** 1.4.0-beta13 (protocol 12): in displayId, keyCode, n, n x modifier keyCode  out: status, injected(0/1). */
+        const val INJECT_COMBO = FIRST_CALL_TRANSACTION + 19
+        /** Apps the service silenced, so a service that was killed gives them back on its next start. Shell-owned. */
+        const val FILE = "/data/local/tmp/agent-vscreen-muted.json"
+        /** "allow" / "ignore" / "default" … as `appops get` says it, or null when it cannot be read. */
+        /** The package's own PLAY_AUDIO record ("default" when it has none); null when the output says nothing. */
+        fun parsePlayAudio(out: String): String? =
+            PlayAudio.parse(out).pkg ?: if (out.contains("No operations", true) || out.contains("PLAY_AUDIO")) "default" else null
         /** A held finger with no update for this long is lifted by the service. */
         const val FINGER_MAX_IDLE_MS = 30_000L
-        /** A display nobody touched for this long (Minis gone) is released. */
+        /** A display nobody touched for this long (app gone) is released. */
         const val ORPHAN_MS = 20 * 60_000L
         /** Bump when the protocol changes, so Shizuku restarts an old service process. */
-        const val PROTOCOL = 11
+        const val PROTOCOL = 12
         /** Shizuku's reserved "destroy user service" transaction. */
         const val DESTROY_CODE = 16777115
         private const val SHELL_PKG = "com.android.shell"

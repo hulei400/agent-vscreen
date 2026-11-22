@@ -29,15 +29,18 @@ internal object VScreenHandoff {
     data class TaskRef(val taskId: Int, val pkg: String, val visible: Boolean)
 
     /** Standard (app) tasks on [displayId], top first. Home/recents/assistant tasks are left out. */
-    fun tasksOn(displayId: Int): List<TaskRef> {
+    fun tasksOn(displayId: Int): List<TaskRef> = tasksOrNull(displayId).orEmpty()
+
+    /** [tasksOn], but null when the system's list could not be read (unknown, not "no tasks"). */
+    fun tasksOrNull(displayId: Int): List<TaskRef>? {
         // The system's own per-display list (through the display service).
         VScreenShell.taskSource(displayId)?.let { list ->
             return list.filter { it.isAppTask }.mapNotNull { t -> t.pkg?.let { TaskRef(t.taskId, it, t.visible) } }
                 .distinctBy { it.taskId }
         }
         // 1.2: no dumpsys fallback. Text scraped from dumpsys differs per maker and Android version and mixed up
-        // displays; when the system's own list cannot be read the answer is "unknown" (empty), never a guess.
-        return emptyList()
+        // displays; when the system's own list cannot be read the answer is "unknown" (null), never a guess.
+        return null
     }
 
     /** The launcher (home) packages, which are never handed over. */
@@ -174,16 +177,21 @@ internal object VScreenHandoff {
         null
     }.getOrNull()
 
-    /** A heads-up notification; false when the system does not allow it (see [notifyBlocked]) or posting failed. */
-    fun alert(context: Context, id: Int, title: String, body: String): Boolean = runCatching {
+    /**
+     * A heads-up notification; false when the system does not allow it (see [notifyBlocked]) or posting failed.
+     * 1.4.0-beta11: [tap] is required: every notification opens the place where it is handled (host.Needs.open).
+     */
+    fun alert(context: Context, id: Int, title: String, body: String, tap: android.app.PendingIntent,
+              actions: List<Pair<String, android.app.PendingIntent>> = emptyList()): Boolean = runCatching {
         if (notifyBlocked(context) != null) return@runCatching false
         ensureAlertChannel(context)
         val n = NotificationCompat.Builder(context, ALERT_CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(com.kilon.agentvscreen.R.drawable.ic_stat)
             .setContentTitle(title).setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
+            .setContentIntent(tap).apply { actions.forEach { (t, pi) -> addAction(0, t, pi) } }
             .build()
         context.getSystemService(NotificationManager::class.java)?.notify(id, n)
         true

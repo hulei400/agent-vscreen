@@ -1,7 +1,6 @@
 package com.kilon.agentvscreen.cmd
 
 import android.content.Context
-import com.kilon.agentvscreen.I18n
 import com.kilon.agentvscreen.core.BackgroundOperation
 import com.kilon.agentvscreen.core.BackgroundOperation.ActionError
 import com.kilon.agentvscreen.core.VScreenDisplay
@@ -48,7 +47,7 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
         internal val lastElements = HashMap<String, ElSet>()
 
         /** Commands that do not read the app on the screen themselves (act and launch check the app rules per step). */
-        internal val RULE_FREE = setOf("status", "apps", "release", "stop", "fix", "help", "handoff", "note", "keep", "launch", "act", "events", "done", "title", "task", "diag", "shell")
+        internal val RULE_FREE = setOf("status", "apps", "sound", "release", "stop", "fix", "help", "handoff", "note", "keep", "schedule", "ask", "teach", "launch", "act", "events", "trail", "done", "title", "task", "diag", "shell")
 
         /**
          * 1.2: the screen queue. There is one background screen; commands that work on it run one at a time, in the
@@ -100,6 +99,8 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
         val argv = request.argv.drop(1)
         if (argv.firstOrNull() !in setOf(null, "help", "--help", "-h"))
             com.kilon.agentvscreen.host.quiet("audit") { Audit.command(call?.tokenName ?: "main", call?.peer, request.sessionId ?: DEFAULT_SESSION, argv, r.codeOrDefault, r.exitCode, android.os.SystemClock.elapsedRealtime() - t0, call?.requestId) }
+        if (argv.firstOrNull() !in setOf(null, "help", "--help", "-h"))
+            com.kilon.agentvscreen.host.quiet("tasklog") { com.kilon.agentvscreen.core.TaskLog.onCommand(request.sessionId ?: DEFAULT_SESSION, call?.tokenName ?: "main", argv, r.codeOrDefault, r.exitCode, android.os.SystemClock.elapsedRealtime() - t0, r.output) }
         return r
     }
 
@@ -126,9 +127,16 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
                 BackgroundOperation.refreshStatus()
                 enforceRules(sub)
                 dispatch(sub, args, sid)
+            }.let { r ->
+                // 1.3 beta2: an option that was clamped is said by every command (collect, zoom … said nothing).
+                val left = takeAdjusted()
+                if (left.isEmpty()) r else r.copy(output = r.output.trimEnd() + "\n" + left.joinToString("\n") { tr("参数被调整：$it", "options adjusted: $it") } + "\n",
+                    data = r.data?.also { d -> d.put("adjusted", org.json.JSONArray(left)) })
             }
         } catch (e: ActionError) {
-            err(e.code, e.message ?: e.code, data = e.data)
+            // A failure after a cut limit (a wait that timed out at the cap) says the cut too.
+            val left = takeAdjusted()
+            err(e.code, (e.message ?: e.code) + left.joinToString("") { tr("（参数被调整：$it）", " (options adjusted: $it)") }, data = e.data)
         } catch (e: OffloadArgs.BadOption) {
             err("INVALID_ARGS", e.message ?: tr("参数不对", "bad arguments"), 2)
         } catch (t: Exception) {
@@ -141,8 +149,8 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
     private fun allowed(spec: CommandSpec.Cmd, need: CommandSpec.Scope) {
         val call = Call.current() ?: return
         if (need.key in call.scopes) return
-        throw ActionError("SCOPE_DENIED", tr("这个令牌（${call.tokenName}）的权限不含“${need.key}”，这条 ${spec.name} 没有执行。权限由用户在 Agent-VScreen › 权限 › 令牌 里定，不要换别的办法绕过；需要的话请用户调整",
-            "This token (${call.tokenName}) does not include \"${need.key}\", so this ${spec.name} did not run. The user sets token permissions in Agent-VScreen › Permissions › Tokens; don't work around it, ask the user to change it if needed"))
+        throw ActionError("SCOPE_DENIED", tr("这个令牌（${call.tokenName}）的权限不含“${need.key}”，这条 ${spec.name} 没有执行。权限由用户在 Agent-VScreen › 设置 › 令牌 里定，不要换别的办法绕过；需要的话请用户调整",
+            "This token (${call.tokenName}) does not include \"${need.key}\", so this ${spec.name} did not run. The user sets token permissions in Agent-VScreen › Settings › Tokens; don't work around it, ask the user to change it if needed"))
     }
 
     /** Run [block] in the screen queue when the command works on the screen. */
@@ -216,10 +224,7 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
     internal fun enforceRules(sub: String) {
         if (VScreenStore.rules.value.isEmpty() || sub in RULE_FREE) return
         val id = BackgroundOperation.state.value.displayId ?: return
-        val pkg = com.kilon.agentvscreen.core.VScreenShell.topPackage(id) ?: return
-        if (VScreenStore.ruleFor(pkg) == VScreenStore.Rule.BLOCK)
-            throw ActionError("APP_BLOCKED", tr("副屏上现在是 $pkg，用户禁止后台操作它（不能读屏也不能操作）：act \"key back\" 离开或 stop。这是用户在 Agent-VScreen › 应用限制 里定的，不要绕过",
-                "The screen now shows $pkg, which the user blocked from background operation (no reading, no actions): leave with act \"key back\" or stop. The user set this in Agent-VScreen › App rules; don't get around it"))
+        com.kilon.agentvscreen.core.Guard.require(com.kilon.agentvscreen.core.Guard.Act.READ, com.kilon.agentvscreen.core.VScreenShell.topPackage(id))
     }
 
     internal fun dispatch(sub: String, args: OffloadArgs, sid: String?): NativeOffloadResult = when (sub) {
@@ -227,17 +232,24 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
         "act" -> act(sid, args)
         "note" -> noteCmd(sid, args)
         "keep" -> keepCmd(sid, args)
+        "schedule" -> scheduleCmd(sid, args)
+        "ask" -> askCmd(sid, args)
+        "teach" -> teachCmd(sid, args)
         "stop" -> stopCmd(sid, args)
         "release" -> releaseCmd(sid)
         "handoff" -> handoffCmd(sid, args)
         "status" -> status(sid, args)
         "apps" -> apps(args)
+        "sound" -> soundCmd(args)
         "events" -> eventsCmd(sid, args)
+        "trail" -> trailCmd(sid, args)
         "task" -> Tasks.command(sid ?: DEFAULT_SESSION, args)
         "done" -> doneCmd(sid)
         "title" -> titleCmd(sid, args)
         "spots" -> spotsCmd(sid, args)
-        "zoom" -> zoomCmd(sid, args)
+        "look" -> lookCmd(sid, args)
+        "zoom" -> lookCmd(sid, args, "zoom")
+        "frames" -> lookCmd(sid, args, "frames")
         "collect" -> collectCmd(sid, args)
         "fix" -> fix(sid, args)
         "diag" -> diagCmd(sid)
@@ -245,7 +257,7 @@ class VScreenOffloadHandler(internal val context: Context) : NativeOffloadHandle
         else -> unknown(sub)
     }
 
-    private fun unknown(sub: String): NativeOffloadResult = if (sub in setOf("resume", "continue", "look", "screenshot", "tap", "type", "swipe", "key", "wait", "scroll"))
+    private fun unknown(sub: String): NativeOffloadResult = if (sub in setOf("resume", "continue", "screenshot", "tap", "type", "swipe", "key", "wait", "scroll"))
         NativeOffloadResult(2, tr("vscreen: 没有 $sub 命令：看画面就 act（不带步骤），点击/输入/滑动/等待都写成 act 的步骤（act \"tap 登录; type 你好\"）。用户在悬浮窗上点了“停止”或接管时，只有用户能交还\n",
             "vscreen: there is no $sub command: to see the screen, act (no steps); tapping / typing / swiping / waiting are act steps (act \"tap Login; type hello\"). When the user tapped \"Stop\" or took over on the floating window, only the user can hand back\n"), "UNKNOWN_COMMAND")
     else NativeOffloadResult(2, tr("vscreen: 没有命令 '$sub'", "vscreen: no command '$sub'") + "\n\n" + CommandSpec.quickHelp() + "\n", "UNKNOWN_COMMAND")

@@ -54,6 +54,7 @@ object UserTouch {
 
     internal fun begin(id: Int, x: Int, y: Int) {
         displayId = id
+        com.kilon.agentvscreen.cmd.Teach.touchDown(id, x, y)
         pendingMove.set(null)
         handler.post { inject(id, "down", x, y) }
     }
@@ -62,6 +63,7 @@ object UserTouch {
         if (displayId == null) return
         // Only the newest position is kept; one flush is queued at a time.
         if (pendingMove.getAndSet(x to y) == null) handler.post(flushMove)
+        com.kilon.agentvscreen.cmd.Teach.touchMove(x, y)
     }
 
     fun up(x: Int, y: Int) = end("up", x, y)
@@ -72,8 +74,12 @@ object UserTouch {
     private fun end(op: String, x: Int, y: Int) {
         val id = displayId ?: return
         displayId = null
+        val reading = com.kilon.agentvscreen.cmd.Teach.lastReading()
+        com.kilon.agentvscreen.cmd.Teach.touchUp(x, y, cancelled = op == "cancel")
         val last = pendingMove.getAndSet(null)
         handler.post {
+            // 示教: the screen is read before the finger lifts (a tap acts on lift), so the step's target is what was there.
+            reading?.let { r -> runCatching { r.get(600, java.util.concurrent.TimeUnit.MILLISECONDS) } }
             // The last move the finger made before lifting decides where a fling starts from: never dropped.
             if (op == "up" && last != null) inject(id, "move", last.first, last.second)
             inject(id, op, x, y)
@@ -83,6 +89,4 @@ object UserTouch {
 
     val active: Boolean get() = displayId != null
 
-    /** For tests: wait until everything queued was sent. */
-    internal fun drain() { val l = java.util.concurrent.CountDownLatch(1); handler.post { l.countDown() }; l.await(2, java.util.concurrent.TimeUnit.SECONDS) }
 }

@@ -1,0 +1,221 @@
+package com.kilon.agentvscreen.core
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.Executors
+
+/**
+ * 1.4.0-beta3: what the user sees as "a task" — one turn of one session (Turns: from its first command until it says
+ * `done` or goes quiet), with what it was called (`vscreen title`), which app it was in, how many commands, how it
+ * ended, and four small frames. The 记录 timeline and the home page's 刚才 read this; the commands themselves stay in
+ * the audit log (a task's detail page reads them from there, between its start and end).
+ *
+ * Kept in files/tasks: log.jsonl (newest last, the last [KEEP]) and the frames beside it. A frame is taken after a
+ * command at most every [FRAME_GAP_MS]; a task keeps its first frame and its last three.
+ */
+object TaskLog {
+    const val KEEP = 200
+    private const val COMPACT_AT = KEEP * 2
+    private const val FRAME_GAP_MS = 2_500L
+    private const val FRAMES = 4
+    private const val QUIET_MS = 10 * 60_000L
+
+    class Task(
+        val id: Long, val session: String, val token: String, val start: Long,
+        var end: Long = 0L, var title: String? = null, var pkg: String? = null,
+        var commands: Int = 0, var lastCode: String = "OK", var failed: Int = 0, var stoppedByUser: Boolean = false,
+        val frames: MutableList<String> = ArrayList(), @Volatile var lastFrameAt: Long = 0L,
+    ) {
+        /** When its last command came (only while open). */
+        @Volatile var lastAt: Long = start
+        val running get() = end == 0L
+        fun json(): JSONObject = JSONObject().put("id", id).put("session", session).put("token", token).put("start", start).put("end", end)
+            .put("title", title ?: JSONObject.NULL).put("pkg", pkg ?: JSONObject.NULL).put("commands", commands).put("last_code", lastCode)
+            .put("failed", failed).put("stopped_by_user", stoppedByUser).put("frames", JSONArray(frames))
+        companion object {
+            fun of(o: JSONObject) = Task(o.optLong("id"), o.optString("session"), o.optString("token"), o.optLong("start"), o.optLong("end"),
+                o.optString("title").takeIf { it.isNotEmpty() && it != "null" }, o.optString("pkg").takeIf { it.isNotEmpty() && it != "null" },
+                o.optInt("commands"), o.optString("last_code", "OK"), o.optInt("failed"), o.optBoolean("stopped_by_user"),
+                o.optJSONArray("frames")?.let { a -> MutableList(a.length()) { a.optString(it) } } ?: ArrayList())
+        }
+    }
+
+    @Volatile private var dir: File? = null
+    private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "vscreen-tasklog").apply { isDaemon = true } }
+    private val open = HashMap<String, Task>()
+    private val done = ArrayList<Task>()
+    @Volatile private var loaded = false
+    private var diskLines = 0
+    private var lastId = 0L
+
+    @Volatile private var app: Context? = null
+    fun init(ctx: Context) = synchronized(this) { app = ctx.applicationContext; dir = File(ctx.filesDir, "tasks").apply { mkdirs() }; loaded = false; diskLines = 0; lastId = 0L; open.clear(); done.clear() }
+    internal fun flushForTest() { worker.submit {}.get() }
+    fun frameFile(name: String): File? = dir?.let { File(it, name) }?.takeIf { it.isFile && name.matches(Regex("^t[0-9_]+(s[0-9]+)?\\.jpg$")) }
+
+    // ── 1.4.0-beta5: every step of a task, to open one by one on the task's page ──
+    private const val STEP_TEXT = 4_000
+    private const val STEP_FRAMES = 60
+    private const val STEP_PICS_TASKS = 20
+
+    private fun stepsFile(id: Long) = dir?.let { File(it, "t$id.steps.jsonl") }
+
+    /**
+     * One command of a task: the command as logged (typed text as a length), how it ended, how long it took, what the
+     * agent was told (pictures left out), and a small copy of the picture it got (the reply's own pictures are cleared
+     * with the screen, so a copy is kept here, at most [STEP_FRAMES] per task).
+     */
+    private fun saveStep(t: Task, n: Int, argv: List<String>, code: String, exit: Int, ms: Long, output: String) {
+        val f = stepsFile(t.id) ?: return
+        val shot = com.kilon.agentvscreen.cmd.ShotStore.refs(output).firstOrNull()
+        var frame: String? = null
+        if (shot != null && n <= STEP_FRAMES) runCatching {
+            val c = app ?: return@runCatching
+            val src = com.kilon.agentvscreen.cmd.ShotStore.file(c, shot) ?: return@runCatching
+            val b = android.graphics.BitmapFactory.decodeFile(src.path) ?: return@runCatching
+            val name = "t${t.id}_s$n.jpg"
+            Pictures.write(b, File(f.parentFile, name), Pictures.Use.STEP); b.recycle(); frame = name
+        }
+        val text = com.kilon.agentvscreen.cmd.ShotStore.IN_TEXT.replace(output, "").trim().take(STEP_TEXT)
+        val o = JSONObject().put("n", n).put("at", System.currentTimeMillis()).put("cmd", com.kilon.agentvscreen.host.Audit.redact(argv))
+            .put("code", code).put("exit", exit).put("ms", ms).put("text", text).put("frame", frame ?: JSONObject.NULL)
+        f.appendText(o.toString() + "\n")
+    }
+
+    /** The steps of task [id], oldest first (empty for tasks from before 1.4.0-beta5). */
+    fun steps(id: Long): List<JSONObject> = runCatching {
+        stepsFile(id)?.takeIf { it.isFile }?.readLines()?.mapNotNull { l -> runCatching { JSONObject(l) }.getOrNull() }
+    }.getOrNull() ?: emptyList()
+
+    private fun dropFiles(t: Task) {
+        t.frames.forEach { n -> dir?.let { File(it, n).delete() } }
+        dir?.listFiles { f -> f.name.startsWith("t${t.id}_s") || f.name == "t${t.id}.steps.jsonl" }?.forEach { it.delete() }
+    }
+
+    private fun load() {
+        if (loaded) return
+        loaded = true
+        val f = dir?.let { File(it, "log.jsonl") } ?: return
+        if (!f.isFile) { diskLines = 0; return }
+        val lines = runCatching { f.readLines() }.getOrNull() ?: run { diskLines = 0; return }
+        diskLines = lines.size
+        val byId = LinkedHashMap<Long, Task>()
+        for (l in lines) {
+            if (l.isBlank()) continue
+            val t = runCatching { Task.of(JSONObject(l)) }.getOrNull() ?: continue
+            byId.remove(t.id)
+            byId[t.id] = t
+            if (t.id > lastId) lastId = t.id
+        }
+        val all = byId.values.toList()
+        if (all.size > KEEP) {
+            all.subList(0, all.size - KEEP).forEach { dropFiles(it) }
+            done.addAll(all.takeLast(KEEP))
+        } else {
+            done.addAll(all)
+        }
+    }
+
+    private fun compactLocked(d: File, f: File) {
+        val tmp = File(d, "log.jsonl.tmp")
+        runCatching {
+            val content = if (done.isEmpty()) "" else done.joinToString("\n") { it.json().toString() } + "\n"
+            tmp.writeText(content)
+            if (!tmp.renameTo(f)) {
+                tmp.copyTo(f, overwrite = true)
+                tmp.delete()
+            }
+            diskLines = done.size
+        }
+    }
+
+    /** A command of [session] finished with [code] (called for every audited command). */
+    fun onCommand(session: String, token: String, argv: List<String>, code: String, exit: Int, ms: Long = 0L, output: String = "") {
+        val sub = argv.firstOrNull() ?: return
+        if (sub in setOf("status", "guide", "help", "remembered", "events", "diag", "version")) return
+        val now = System.currentTimeMillis()
+        // 1.4.0-beta5 (test: home said "running" after release / stop): the log hears of a command after it ran, so
+        // `release` ended the turn and then opened a new one for itself. A command that ends the turn is the last step
+        // of the open task (none open: nothing to log), and the task ends with it.
+        val ends = sub in setOf("done", "release", "stop")
+        if (ends && synchronized(this) { open[session] } == null) return
+        val t = synchronized(this) {
+            load()
+            open.getOrPut(session) {
+                val id = maxOf(now, lastId + 1)
+                lastId = id
+                Task(id, session, token, now)
+            }.also { t ->
+                t.commands++; t.lastCode = code; t.lastAt = now; if (exit != 0) t.failed++
+                BackgroundOperation.state.value.agentTitle?.let { t.title = it }
+            }
+        }
+        val n = t.commands
+        worker.execute { runCatching { saveStep(t, n, argv, code, exit, ms, output) } }
+        if (ends) { onTurnEnd(session); return }
+        if (now - t.lastFrameAt < FRAME_GAP_MS) return
+        t.lastFrameAt = now
+        worker.execute { runCatching { capture(t) } }
+    }
+
+    private fun capture(t: Task) {
+        val d = BackgroundOperation.previewDisplayFor(t.session) ?: return
+        VScreenShell.topPackage(d.displayId)?.let { p -> if (p !in VScreenShell.protectedPackages) t.pkg = p }
+        val bmp = d.latestFrame()?.takeIf { !it.isRecycled && it.width > 0 } ?: return
+        val dir = dir ?: return
+        val name = "t${t.id}_${System.currentTimeMillis() % 1_000_000}.jpg"
+        Pictures.write(bmp, File(dir, name), Pictures.Use.TASK)
+        synchronized(this) {
+            t.frames += name
+            if (t.frames.size > FRAMES) t.frames.removeAt(1).let { File(dir, it).delete() }
+        }
+    }
+
+    /** The turn of [session] is over (done, quiet, released); [byUser]: the user pressed stop. */
+    fun onTurnEnd(session: String, byUser: Boolean = false) {
+        val t = synchronized(this) { open.remove(session) } ?: return
+        t.end = maxOf(t.lastAt, if (System.currentTimeMillis() - t.lastAt > QUIET_MS) t.lastAt else System.currentTimeMillis()); t.stoppedByUser = t.stoppedByUser || byUser
+        synchronized(this) { load(); done += t }
+        worker.execute {
+            synchronized(this) {
+                val d = dir ?: return@execute
+                val drop = if (done.size > KEEP) done.subList(0, done.size - KEEP).toList() else emptyList()
+                drop.forEach { old -> dropFiles(old) }
+                // 1.4.0-beta6: step pictures are full size now; only the newest tasks keep theirs (their text stays).
+                if (done.size > STEP_PICS_TASKS) done.subList(0, done.size - STEP_PICS_TASKS).forEach { old ->
+                    d.listFiles { f -> f.name.startsWith("t${old.id}_s") && f.name.endsWith(".jpg") }?.forEach { it.delete() }
+                }
+                if (drop.isNotEmpty()) done.removeAll(drop.toSet())
+                // 1.4.1-beta1: append-only per turn, compacting only when log.jsonl grows past COMPACT_AT lines.
+                val f = File(d, "log.jsonl")
+                if (diskLines + 1 >= COMPACT_AT) {
+                    compactLocked(d, f)
+                } else {
+                    runCatching { f.appendText(t.json().toString() + "\n"); diskLines++ }
+                }
+            }
+        }
+    }
+
+    /** The user pressed stop: the running task of [session] ends as stopped by the user. */
+    fun stoppedByUser(session: String) { synchronized(this) { open[session]?.stoppedByUser = true } }
+
+    /** Newest first: running tasks, then finished ones. */
+    fun recent(n: Int = KEEP): List<Task> {
+        // 1.4.0-beta4: an agent that went away without `done` (or a screen released under it) left its task "running"
+        // for ever; the home page then said "last: … running" over a resting screen. Quiet for QUIET_MS = over.
+        val now = System.currentTimeMillis()
+        synchronized(this) { open.values.filter { now - it.lastAt > QUIET_MS }.map { it.session } }.forEach { onTurnEnd(it) }
+        return recentNow(n)
+    }
+
+    private fun recentNow(n: Int): List<Task> = synchronized(this) {
+        load()
+        (open.values.sortedByDescending { it.start } + done.asReversed()).take(n)
+    }
+
+    /** Whether any agent has ever run a task here (the home page's first-use guide). */
+    fun everUsed(): Boolean = synchronized(this) { load(); open.isNotEmpty() || done.isNotEmpty() }
+}

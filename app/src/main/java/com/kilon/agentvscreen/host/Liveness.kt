@@ -49,7 +49,49 @@ object Liveness {
     private const val CANARY_BINDER_TIMEOUT_MS = 3_000L
     @Volatile private var pm: android.os.PowerManager? = null
     @Volatile private var app: Context? = null
-    fun init(ctx: Context) { app = ctx.applicationContext; pm = ctx.getSystemService(android.os.PowerManager::class.java) }
+    fun init(ctx: Context) {
+        app = ctx.applicationContext; pm = ctx.getSystemService(android.os.PowerManager::class.java)
+        watchNetwork(ctx.applicationContext)
+    }
+
+    /**
+     * 1.3.0: whether the system blocks this app's network while the process keeps running. A vendor background
+     * manager can cut an app's network in the background instead of freezing it; the process then looks alive (no
+     * freeze is measured) while the Tailscale node loses its relay. Android reports that block to the app itself
+     * (onBlockedStatusChanged), so it is measured, not guessed.
+     */
+    @Volatile var netBlocked = false; private set
+    @Volatile var netBlocks = 0; private set
+    /** Blocks that began while the user was out of the app (what makes other devices lose the phone). */
+    @Volatile var netBlocksAway = 0; private set
+    @Volatile var lastNetBlockMs = 0L; private set
+    @Volatile private var netBlockedAt = 0L
+    @Volatile private var netWatching = false
+
+    private fun watchNetwork(ctx: Context) {
+        if (netWatching || android.os.Build.VERSION.SDK_INT < 29) return
+        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        netWatching = quiet("Liveness:net") {
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onBlockedStatusChanged(network: android.net.Network, blocked: Boolean) {
+                    if (blocked == netBlocked) return
+                    netBlocked = blocked
+                    val away = AppFront.awayMs()
+                    if (blocked) {
+                        netBlocks++; if (away > 0) netBlocksAway++
+                        netBlockedAt = SystemClock.elapsedRealtime()
+                        AppLogger.warning("Liveness", "the system blocked this app's network (" +
+                            (if (away > 0) "app in background ${away / 1000}s" else "app in front") + ", screen " + (if (interactive()) "on" else "off") + ")")
+                    } else {
+                        lastNetBlockMs = SystemClock.elapsedRealtime() - netBlockedAt
+                        AppLogger.info("Liveness", "network unblocked after ${lastNetBlockMs / 1000}s")
+                    }
+                }
+            })
+            true
+        } == true
+    }
+
     private fun interactive(): Boolean = runCatching { pm?.isInteractive }.getOrNull() ?: true
     private var ticker: Thread? = null
 
@@ -61,28 +103,28 @@ object Liveness {
     fun serviceGone() { foreground = false }
 
     @Synchronized fun start() {
-        if (ticker?.isAlive != true) {
-            ticker = Thread({
-                var last = SystemClock.uptimeMillis()
-                var wasOn = interactive()
-                while (true) {
-                    try { Thread.sleep(1_000) } catch (_: InterruptedException) { return@Thread }
-                    val now = SystemClock.uptimeMillis()
-                    val gap = now - last - 1_000
-                    last = now
-                    val on = interactive()
-                    if (gap >= 3_000) {
-                        freezes++; lastFreezeMs = gap; lastFreezeAt = SystemClock.elapsedRealtime(); lastFreezeWall = System.currentTimeMillis()
-                        if (gap > longestFreezeMs) longestFreezeMs = gap
-                        // On before and after the gap: the user was using the phone while we were frozen.
-                        val screenOn = wasOn && on
-                        if (screenOn) { screenOnFreezes++; screenOnFreezesSinceVisit++; lastScreenOnFreezeMs = gap; lastScreenOnFreezeWall = lastFreezeWall }
-                        AppLogger.warning("Liveness", "process was frozen for ${gap / 1000}s (${if (screenOn) "screen on" else "screen off: ignored for setup"})")
-                    }
-                    wasOn = on
+        if (ticker?.isAlive == true) return
+        ticker = Thread({
+            var last = SystemClock.uptimeMillis()
+            var wasOn = interactive()
+            while (true) {
+                try { Thread.sleep(1_000) } catch (_: InterruptedException) { return@Thread }
+                val now = SystemClock.uptimeMillis()
+                val gap = now - last - 1_000
+                last = now
+                val on = interactive()
+                if (gap >= 3_000) {
+                    freezes++; lastFreezeMs = gap; lastFreezeAt = SystemClock.elapsedRealtime(); lastFreezeWall = System.currentTimeMillis()
+                    if (gap > longestFreezeMs) longestFreezeMs = gap
+                    // On before and after the gap: the user was using the phone while we were frozen.
+                    val screenOn = wasOn && on
+                    if (screenOn) { screenOnFreezes++; screenOnFreezesSinceVisit++; lastScreenOnFreezeMs = gap; lastScreenOnFreezeWall = lastFreezeWall }
+                    AppLogger.warning("Liveness", "process was frozen for ${gap / 1000}s (${if (screenOn) "screen on" else "screen off: ignored for setup"}, " +
+                        (if (AppFront.visible) "app in front" else "app in background") + ")")
                 }
-            }, "vscreen-liveness").apply { isDaemon = true; priority = Thread.MAX_PRIORITY }.also { it.start() }
-        }
+                wasOn = on
+            }
+        }, "vscreen-liveness").apply { isDaemon = true; priority = Thread.MAX_PRIORITY }.also { it.start() }
         if (canaryThread?.isAlive != true) {
             canaryThread = Thread({ canaryLoop() }, "vscreen-canary").apply { isDaemon = true }.also { it.start() }
         }
@@ -196,6 +238,10 @@ object Liveness {
         .put("frozen_screen_on_count", screenOnFreezes)
         .put("frozen_unresolved", frozenUnresolved())
         .put("keep_alive_window", Presence.up)
+        .put("network_blocked", netBlocked)
+        .put("network_blocked_count", netBlocks)
+        .put("network_blocked_in_background", netBlocksAway)
+        .put("last_network_block_s", if (netBlocks > 0) lastNetBlockMs / 1000 else JSONObject.NULL)
         .put("pid", android.os.Process.myPid())
         // r45 canary: "alive but stuck" — frozen_count above only sees a whole frozen process; these say which layer
         // is stuck when the service answers nothing.
@@ -207,6 +253,7 @@ object Liveness {
         .put("canary_pool_busy", canaryPoolBusy)
         .put("binder_ok", binderOk)
         .put("binder_ms", if (binderMs >= 0) binderMs else JSONObject.NULL)
+        .put("previous_exit", ExitInfo.last ?: JSONObject.NULL)
 
     /**
      * Open the vendor page where an app is allowed to keep running in the background (launch manager / autostart);
@@ -239,6 +286,7 @@ object Liveness {
     fun openBackgroundSettings(ctx: Context): String {
         prefs(ctx).edit().putLong("vendor_bg_visited", System.currentTimeMillis()).commit()
         screenOnFreezesSinceVisit = 0
+        Tailnet.resetSilences()
         for ((label, cn) in PAGES) {
             val i = Intent().setComponent(cn).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (runCatching { ctx.startActivity(i) }.isSuccess) return label

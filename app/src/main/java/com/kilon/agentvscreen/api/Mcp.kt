@@ -105,7 +105,7 @@ internal object Mcp {
                 }
                 val session = server.sessionOf(r, a)
                 val (res, replayed) = server.runFor(r, argv, session, p.optJSONObject("_meta")?.optString("requestId")?.takeIf { it.isNotBlank() }, onStep)
-                result(id, toolResult(server, res, replayed))
+                result(id, toolResult(server, res, replayed, session))
             }
             "resources/list" -> result(id, JSONObject().put("resources", JSONArray()))
             "prompts/list" -> result(id, JSONObject().put("prompts", JSONArray()))
@@ -113,13 +113,15 @@ internal object Mcp {
         }
     }
 
-    private fun toolResult(server: ApiServer, res: NativeOffloadResult, replayed: Boolean): JSONObject {
+    private fun toolResult(server: ApiServer, res: NativeOffloadResult, replayed: Boolean, session: String?): JSONObject {
         val shots = ShotStore.refs(res.output)
+        // 1.4.0-beta2: only pictures that say something new, as compact copies (ImagePolicy).
+        val sent = ImagePolicy.pick(res, shots)
         var text = res.output
-        shots.forEachIndexed { i, n -> text = text.replace(ShotStore.REF + n, tr("[图${i + 1}，见附图]", "[picture ${i + 1}, attached]")) }
+        shots.forEachIndexed { i, n -> text = text.replace(ShotStore.REF + n, if (n in sent) tr("[图${sent.indexOf(n) + 1}，见附图]", "[picture ${sent.indexOf(n) + 1}, attached]") else ImagePolicy.leftOut()) }
         val content = JSONArray().put(JSONObject().put("type", "text").put("text", text))
-        for (n in shots.take(4)) {
-            val f = ShotStore.file(server.ctxFiles(), n) ?: continue
+        for (n in sent) {
+            val f = ShotStore.file(server.ctxFiles(), ImagePolicy.sendName(server.ctxFiles(), res, n)) ?: continue
             content.put(JSONObject().put("type", "image").put("mimeType", "image/jpeg").put("data", Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)))
         }
         val structured = JSONObject()

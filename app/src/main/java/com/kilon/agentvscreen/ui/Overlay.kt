@@ -8,7 +8,6 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.os.Handler
@@ -24,11 +23,17 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -37,6 +42,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -48,9 +54,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.SmartToy
@@ -63,6 +68,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -80,6 +86,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -114,6 +121,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -131,16 +139,14 @@ import java.util.Locale
  *
  * Gestures (handled on raw screen coordinates by [GestureFrame], so moving the window never jitters):
  *  - one finger drags the window, and it keeps gliding when you let go of it moving (inertia);
- *  - fling it toward a corner: it shrinks to the smallest size and parks in that corner; fling a small one back toward the
- *    middle and it grows to its earlier size;
- *  - carry it to the left / right edge and it turns into a small tab right under the finger, while you still hold it;
- *    pull the tab inward and the window opens under the finger and keeps following (folding follows the hand);
- *  - let go (or glide) with a good part of it past any of the four edges: it folds into the tab on the nearer side
- *    (tap the tab to bring it back);
+ *  - a fling only moves it (1.3.0-beta16); the size changes by pinching only;
+ *  - let go (or fling) with half of it past the left / right edge: it slides on into that edge until a tab-wide strip
+ *    shows, and the tab takes that very strip (1.3.0-beta17); tap the tab and the window slides back out; pull the tab
+ *    inward and the window opens under the finger;
  *  - two fingers pinch to resize, anchored at the point between them (120 dp … 85 % of the screen);
- *  - hold one finger still for 1 s to take over (a ring fills); a light tap only shows these hints; the “接管”
- *    pill at the bottom right takes over at once (with a vibration), and “交还 AI” hands back — the window is
- *    view-only by default, never operable by accident;
+ *  - hold one finger still for 0.5 s to take over (a ring fills); a light tap only shows these hints; the window is
+ *    view-only by default, never operable by accident. (v18: the “接管” pill is gone; hold is the way now, and
+ *    “交还 AI” hands back.)
  *  - while you hold the screen, taps / swipes / long presses on the picture go to the background screen, and you move
  *    the window by its title pill. Tap an input box on the picture and the system keyboard pops up: a hidden sink
  *    in this window carries the typing to the background screen's focused field (see [ImeBridge]).
@@ -148,12 +154,12 @@ import java.util.Locale
  *    there in full (command, stdout, stderr, exit code), newest at the bottom, and the log scrolls. The terminal
  *    is read-only here; commands are run by the agent (`vscreen shell`), not typed in the window.
  * Buttons (1.1.6: one job per place, so a quick double tap can never stop the AI by accident):
- * Buttons (1.1.6: one job per place, so a quick double tap can never stop the AI by accident):
  *  - top right: ⤢ full screen and × close. × is always there and always one tap: while the AI works it only hides the
  *    window for this turn (the AI goes on; the notification can bring it back); when nothing runs it closes the screen.
  *    Closing never stops or locks the AI.
- *  - bottom left, only while the AI acts or waits: the red tr("停止 AI", "Stop AI") pill (its calls get USER_STOPPED until you allow
- *    it again: green 交还 AI pill here, the "已停止 AI" notification, or the app's home).
+ *  - bottom centre, only while you hold the screen or the AI is stopped: the green 交还 AI pill (or the "已停止 AI"
+ *    notification, or the app's home). (v18: the red “停止 AI” pill is gone from the window; stop from the
+ *    app's home or the full-screen page.)
  * While our own full-screen page is in front, the window steps aside (the page already shows the same picture).
  */
 object Overlay {
@@ -191,10 +197,53 @@ object Overlay {
     internal val scrollControls = HashMap<String, RectF>()
     /** The keyboard bridge (hidden input sink); created with the window, gone with it. */
     private var imeBridge: ImeBridge? = null
+    /** 1.3.0-beta16: what the current touch is, said by the picture layer (see GestureFrame). */
+    @Volatile internal var pictureDown = false
+    @Volatile internal var pictureLive = false
+    @Volatile internal var pictureHeld = false
+    @Volatile internal var frameClaimed = false
+
+    /** A question card hangs below the window, or above it when the window sits too low for it. */
+    /**
+     * 1.4.0-beta3: the window and its question card are ONE group for placement. beta2 placed the window by the
+     * picture's height alone (opening from the tab, and the 190 dp guess that chose above / below), so the card hung
+     * past the bottom edge and a later settle() jumped the whole thing up. Now the card is measured as it lays out
+     * ([cardH]), it always hangs below the picture, and every resting place (opening, release, a card arriving) keeps
+     * the whole group on screen; the window glides up in step with the card growing in.
+     */
+    internal val cardH = androidx.compose.runtime.mutableFloatStateOf(0f)
+    internal val cardShown = androidx.compose.runtime.mutableStateOf(false)
+    private const val CARD_GUESS = 190f
+    /** The group's height when it comes to rest: picture (with its frame margin) plus the card and the gap. */
+    internal fun groupH(): Float {
+        val pic = (widthPx.floatValue + 2 * pad()) / aspect()
+        return pic + if (cardShown.value) (cardH.floatValue.takeIf { it > 0f } ?: dp(CARD_GUESS)) + dp(6f) else 0f
+    }
+    /** Keep the whole group on screen: glide up (or down) only as far as needed, in [ms] (the card's grow time). */
+    internal fun fitGroup(ms: Long = CARD_MS) {
+        val l = lp ?: return
+        if (docked.value) return
+        val sh = screenH().toFloat(); val h = groupH()
+        val lo = topMargin().coerceAtMost(sh - h)
+        val hi = (sh - h - bottomMargin()).coerceAtLeast(0f)
+        // The group (picture + card) can grow taller than the screen; then lo > hi and
+        // coerceIn would throw "Cannot coerce value to an empty range" and crash the process
+        // (killed the accessibility service twice on 2026-11-19 08:09/08:11). Clamp the range.
+        val y = l.y.toFloat().coerceIn(minOf(lo, hi), maxOf(lo, hi))
+        if (y.toInt() != l.y) animateTo(l.x, y.toInt(), ms = ms)
+    }
+    /** How long the card takes to grow in or out; the window's glide uses the same time and easing. */
+    internal const val CARD_MS = 260L
 
     /** Our full-screen page is in front: it shows the same picture, so the floating window steps aside. */
-    private val fullscreenOpen = MutableStateFlow(false)
-    fun fullscreenShown(open: Boolean) { fullscreenOpen.value = open }
+    /**
+     * 1.3.0-beta18: how many of our own full pages are in front (the full screen page, a question's answer page such
+     * as pick-a-point / draw-a-box, the lesson review). While any is, the window steps aside: those pages show the
+     * screen themselves, and the window and its question card would sit on top of what the user has to touch. A count,
+     * not a flag: going from one page to the next starts the new one before the old one stops.
+     */
+    private val pagesInFront = MutableStateFlow(0)
+    fun fullscreenShown(open: Boolean) { pagesInFront.update { (if (open) it + 1 else it - 1).coerceAtLeast(0) } }
 
     fun attach(c: Context) {
         ctx = c.applicationContext
@@ -203,7 +252,7 @@ object Overlay {
             // The window is up while there is a screen, or while a shell command popped it up on the
             // terminal page (no screen needed) — and not while the user hid it with ×, switched the
             // preview off, or the full-screen page is in front.
-            combine(BackgroundOperation.state.map { it.showPreview && !it.windowHidden && (it.displayId != null || it.terminalPopAt > 0L) }.distinctUntilChanged(), fullscreenOpen) { up, full -> up to full }
+            combine(BackgroundOperation.state.map { it.showPreview && !it.windowHidden && (it.displayId != null || it.terminalPopAt > 0L) }.distinctUntilChanged(), pagesInFront.map { it > 0 }.distinctUntilChanged()) { up, full -> up to full }
                 .distinctUntilChanged().collect { (up, full) ->
                     AppLogger.info("Overlay", when { !up -> "no screen / preview off / closed by the user: hide"; full -> "full-screen page in front: hide"; else -> "screen up: show" })
                     if (up && !full) show() else hide()
@@ -214,7 +263,7 @@ object Overlay {
     fun detach() { job?.cancel(); job = null; hide() }
 
     /** Re-check after the overlay permission was granted. */
-    fun refresh() { val s = BackgroundOperation.state.value; if (s.showPreview && !s.windowHidden && !fullscreenOpen.value && (s.displayId != null || s.terminalPopAt > 0L)) show() }
+    fun refresh() { val s = BackgroundOperation.state.value; if (s.showPreview && !s.windowHidden && pagesInFront.value == 0 && (s.displayId != null || s.terminalPopAt > 0L)) show() }
 
     /**
      * Let the window take keyboard focus (so the keyboard bridge's hidden sink can open the soft keyboard), or
@@ -240,8 +289,18 @@ object Overlay {
 
     internal fun hitScroll(x: Float, y: Float) = scrollControls.values.any { it.contains(x, y) }
 
+    internal fun hitControl(x: Float, y: Float) = controls.values.any { it.contains(x, y) }
+
     /** 1.1.6: the × button. One tap, never a lock: see [BackgroundOperation.closeWindow]. */
     fun closeTapped() {
+        // 1.4.0-beta11 (DESIGN §4.2): while the user shows a lesson the × folds the window to the edge; it never hands
+        // the screen back or ends the lesson (that is 完成 / 不教 on the strip).
+        val l = com.kilon.agentvscreen.cmd.Teach.lesson.value
+        if (l is com.kilon.agentvscreen.cmd.Lesson.Ready || l is com.kilon.agentvscreen.cmd.Lesson.Recording) {
+            dock(dockRight.value)
+            ctx?.let { android.widget.Toast.makeText(it, tr("收到边上了，示教还在继续", "Folded to the edge; the lesson goes on"), android.widget.Toast.LENGTH_SHORT).show() }
+            return
+        }
         val msg = BackgroundOperation.closeWindow()
         ctx?.let { android.widget.Toast.makeText(it, msg, android.widget.Toast.LENGTH_LONG).show() }
     }
@@ -401,7 +460,7 @@ object Overlay {
     }
 
     // ---- Where the window comes to rest (release, fling, rotation). ----
-    private const val FOLD = 0.2f      // this much of the window past an edge → fold into a tab
+    private const val FOLD = 0.5f      // half the window past a side edge (on release) → fold into a tab
     private const val GLIDE_S = 0.2f   // inertia: where a fling would carry the window (velocity × this)
     private var anim: android.animation.ValueAnimator? = null
 
@@ -413,7 +472,6 @@ object Overlay {
     internal const val TAB_H = 60f
     private fun bottomMargin() = dp(48f)
     internal fun stopAnim() { anim?.cancel(); anim = null }
-    internal fun isMini() = widthPx.floatValue <= clampWidth(0f) + dp(2f)
 
     /** Glide to (x, y), optionally changing the width, then run [then] (default: remember the place). */
     private fun animateTo(x: Int, y: Int, width: Float? = null, ms: Long = 240L, then: (() -> Unit)? = null) {
@@ -449,41 +507,10 @@ object Overlay {
      */
     internal fun fling(vx: Float, vy: Float, fingerY: Float? = null) {
         val l = lp ?: return
-        val sw = screenW().toFloat(); val sh = screenH().toFloat()
-        val w = winW(); val h = winH()
         val px = l.x + vx * GLIDE_S; val py = l.y + vy * GLIDE_S
-        val cx = px + w / 2; val cy = py + h / 2
-        val ax = abs(vx); val ay = abs(vy)
-        val diagonal = min(ax, ay) / max(ax, ay).coerceAtLeast(1f) > 0.35f
-        val towardCornerX = (vx < 0 && cx < sw * 0.4f) || (vx > 0 && cx > sw * 0.6f)
-        val towardCornerY = (vy < 0 && cy < sh * 0.4f) || (vy > 0 && cy > sh * 0.6f)
-        when {
-            diagonal && towardCornerX && towardCornerY -> toCorner(right = vx > 0, bottom = vy > 0)
-            isMini() && prefs().contains("w_full") && cx in sw * 0.25f..sw * 0.75f && cy in sh * 0.2f..sh * 0.8f -> grow(px, py)
-            else -> restAt(px, py, fingerY?.let { it + vy * GLIDE_S })
-        }
-    }
-
-    private fun toCorner(right: Boolean, bottom: Boolean) {
-        if (!isMini()) prefs().edit().putFloat("w_full", widthPx.floatValue).apply()
-        val mw = clampWidth(0f)
-        val k = (mw + dp(12f)) / winW()
-        val nw = mw + dp(12f); val nh = winH() * k
-        val m = dp(10f)
-        val x = if (right) screenW() - nw - m else m
-        val y = if (bottom) screenH() - nh - bottomMargin() else topMargin()
-        AppLogger.info("Overlay", "fling to ${if (bottom) "bottom" else "top"}-${if (right) "right" else "left"} corner: smallest")
-        animateTo(x.toInt(), y.toInt(), mw, 300L)
-    }
-
-    private fun grow(px: Float, py: Float) {
-        val fw = clampWidth(prefs().getFloat("w_full", widthPx.floatValue))
-        val k = (fw + dp(12f)) / winW()
-        val nw = fw + dp(12f); val nh = winH() * k
-        val sw = screenW().toFloat(); val sh = screenH().toFloat()
-        val x = (px + winW() / 2 - nw / 2).coerceIn(0f, (sw - nw).coerceAtLeast(0f))
-        val y = (py + winH() / 2 - nh / 2).coerceIn(topMargin(), (sh - nh - bottomMargin()).coerceAtLeast(topMargin()))
-        animateTo(x.toInt(), y.toInt(), fw, 300L)
+        // 1.3.0-beta16: a fling only moves the window (it used to shrink it into a corner or grow it back): the size
+        // changes by pinching only. Flung half past an edge, it folds there (decided now, at the release).
+        restAt(px, py, fingerY?.let { it + vy * GLIDE_S }, vx)
     }
 
     /**
@@ -491,30 +518,15 @@ object Overlay {
      * The tab lands where the user let go ([fingerY], centred on the finger), not at the window's middle — otherwise
      * it appears somewhere other than where it was put. Without a finger (rotation) it keeps the window's top.
      */
-    private fun restAt(px: Float, py: Float, fingerY: Float? = null) {
+    private fun restAt(px: Float, py: Float, fingerY: Float? = null, vx: Float = 0f) {
         val sw = screenW().toFloat(); val sh = screenH().toFloat()
-        val w = winW(); val h = winH()
+        val w = winW(); val h = maxOf(winH(), groupH())
         val side: Boolean? = when {
             px < -w * FOLD -> false
             px + w > sw + w * FOLD -> true
-            py < -h * FOLD || py + h > sh + h * FOLD -> px + w / 2 > sw / 2
             else -> null
         }
-        if (side != null) {
-            val ty = (fingerY?.let { it - dp(TAB_H) / 2 } ?: py).coerceIn(topMargin(), sh - dp(TAB_H) - bottomMargin())
-            // Shrink toward the spot where the tab will sit, then become the tab exactly there.
-            val l = lp!!
-            val tabCx = if (side) sw - dp(TAB_W) / 2 else dp(TAB_W) / 2
-            val v = content()
-            stopAnim()
-            if (v == null || !animateLook) { dock(side, ty.toInt()); resetShrink(); return }
-            v.animate().cancel()
-            v.pivotX = (tabCx - l.x).coerceIn(0f, w); v.pivotY = (ty + dp(TAB_H) / 2 - l.y).coerceIn(0f, h)
-            v.animate().scaleX(tabScale()).scaleY(tabScale()).alpha(0.5f).setDuration(170L)
-                .setInterpolator(android.view.animation.AccelerateInterpolator(1.2f))
-                .withEndAction { swapFade(); dock(side, ty.toInt()) }.start()
-            return
-        }
+        if (side != null) { foldInto(side, fingerY, vx); return }
         val x = px.coerceIn(0f, (sw - w).coerceAtLeast(0f))
         val y = py.coerceIn(topMargin().coerceAtMost(sh - h), (sh - h - bottomMargin()).coerceAtLeast(0f))
         animateTo(x.toInt(), y.toInt())
@@ -529,7 +541,11 @@ object Overlay {
         save()
     }
 
-    // ---- The window <-> tab change, drawn as one continuous motion around the finger. ----
+    // ---- The window <-> tab change: one continuous slide at the edge (1.3.0-beta17). ----
+    // Before, the window shrank where it was let go (or where a fling left it, still well inside the screen) and the
+    // tab then appeared at the edge: a small thing away from the edge that jumped to its final place. Now the window
+    // keeps its size and slides on, at the speed it was let go with, until only a tab-wide strip of it shows at the
+    // edge; the tab takes over exactly that strip. Opening plays the same slide backwards.
     private fun content(): android.view.View? = root?.getChildAt(0)
     private fun tabScale(): Float = (dp(TAB_W) * 1.6f / winW()).coerceIn(0.08f, 1f)
 
@@ -545,12 +561,57 @@ object Overlay {
     }
 
     internal fun resetShrink() { content()?.let { it.animate().cancel(); it.scaleX = 1f; it.scaleY = 1f; it.alpha = 1f } }
+    /** The transparent margin around the window's frame (PAD in [OverlayContent]). */
+    private fun pad() = dp(7f)
 
-    /** The content is about to change between window and tab: hide the one stale frame, then fade the new one in. */
-    private fun swapFade() {
+    /** Where the window's left edge is when only the tab-wide strip of it shows on [right]'s side. */
+    private fun stripX(right: Boolean, w: Float): Float = if (right) screenW() - dp(TAB_W) - pad() else -(w - dp(TAB_W) - pad())
+
+    /** A duration whose opening speed matches [v] px/s (DecelerateInterpolator(1) starts at twice the mean speed). */
+    private fun slideMs(dist: Float, v: Float): Long =
+        if (abs(v) < 1f) 220L else (2f * abs(dist) / abs(v) * 1000f).toLong().coerceIn(120L, 260L)
+
+    /** Released half past a side edge (or flung there): slide into that edge and become the tab there. */
+    private fun foldInto(right: Boolean, fingerY: Float?, vx: Float) {
+        val l = lp ?: return
+        val sh = screenH().toFloat(); val w = winW(); val h = winH(); val tabH = dp(TAB_H)
+        // The tab sits where the finger let go, but never outside the window's own height (no jump up or down);
+        // only the screen's margins may move it, and then the window slides by the same amount.
+        val within = ((fingerY ?: (l.y + h / 2)) - tabH / 2).coerceIn(l.y.toFloat(), (l.y + h - tabH).coerceAtLeast(l.y.toFloat()))
+        val ty = within.coerceIn(topMargin(), sh - tabH - bottomMargin())
+        val x0 = l.x.toFloat(); val y0 = l.y.toFloat()
+        val x1 = stripX(right, w); val y1 = y0 + (ty - within)
+        val v = content()
+        stopAnim()
+        if (v == null || !animateLook) { dock(right, ty.toInt()); return }
+        v.animate().cancel(); v.scaleX = 1f; v.scaleY = 1f
+        val a = android.animation.ValueAnimator.ofFloat(0f, 1f)
+        a.duration = slideMs(x1 - x0, if ((x1 - x0) * vx > 0) vx else 0f)
+        a.interpolator = android.view.animation.DecelerateInterpolator(1f)
+        a.addUpdateListener {
+            val t = it.animatedValue as Float
+            v.alpha = 1f - 0.35f * ((t - 0.6f) / 0.4f).coerceIn(0f, 1f)
+            place((x0 + (x1 - x0) * t).roundToInt(), (y0 + (y1 - y0) * t).roundToInt())
+        }
+        a.addListener(object : android.animation.AnimatorListenerAdapter() {
+            private var cancelled = false
+            override fun onAnimationCancel(animation: android.animation.Animator) { cancelled = true; v.alpha = 1f }
+            override fun onAnimationEnd(animation: android.animation.Animator) {
+                if (anim === a) anim = null
+                if (!cancelled) { swapFade(); dock(right, ty.toInt()) }
+            }
+        })
+        anim = a; a.start()
+    }
+
+    /** The content is about to change between window and tab: hide the stale frames, then fade the new one in. */
+    private fun swapFade(then: (() -> Unit)? = null) {
         val v = content() ?: return
-        v.animate().cancel(); v.alpha = 0f
-        v.postOnAnimationDelayed({ v.scaleX = 1f; v.scaleY = 1f; v.animate().alpha(1f).setDuration(if (animateLook) 110L else 0L).start() }, 34L)
+        v.animate().cancel(); v.alpha = 0f; v.scaleX = 1f; v.scaleY = 1f
+        // Two frames: the window manager has the new size and place before anything shows.
+        v.postOnAnimationDelayed({
+            if (then != null) then() else v.animate().alpha(1f).setDuration(if (animateLook) 110L else 0L).start()
+        }, 34L)
     }
 
     /** While a finger holds it: become (or stay) the tab on that side, centred on the finger, [give] px inward. */
@@ -572,27 +633,36 @@ object Overlay {
         val w = widthPx.floatValue + dp(12f)
         val h = w / aspect()
         place((fingerX - if (right) w * 0.8f else w * 0.2f).toInt(), (fingerY - h * 0.2f).toInt())
-        // Grow out of the finger instead of appearing whole.
-        content()?.let { v ->
-            v.animate().cancel()
-            v.pivotX = if (right) w * 0.8f else w * 0.2f; v.pivotY = h * 0.2f
-            v.scaleX = tabScale(); v.scaleY = tabScale(); v.alpha = 0.6f
-            v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(if (animateLook) 200L else 0L)
-                .setInterpolator(android.view.animation.DecelerateInterpolator(1.6f)).start()
-        }
+        swapFade()
     }
 
+    /**
+     * A tap on the tab: the window opens wholly on screen, at its final place beside that edge, and grows in from
+     * the tab's side. 1.3.0-beta18: beta17 first placed it mostly off screen and slid it in; the window manager showed
+     * that off-screen frame before the slide began, so it flashed half outside and then jumped in. Now it is never
+     * anywhere but where it ends, and stays invisible until it has its real size there.
+     */
     internal fun undock() {
         val l = lp ?: return
-        // Unfolding by hand (or by a shell command popping the window) spends a pending
-        // fold-after-move request, or a later re-attach would fold the window again.
-        BackgroundOperation.clearDockRequest()
+        stopAnim()
+        val right = dockRight.value
+        val w = widthPx.floatValue + 2 * pad()
+        val h = groupH()
+        // The tab stays a third of the way down the window, as when it folded.
+        val y = (l.y + dp(TAB_H) / 2 - h * 0.3f).coerceIn(topMargin(), (screenH() - h - bottomMargin()).coerceAtLeast(topMargin()))
+        val x = (if (right) screenW() - w - dp(8f) else dp(8f)).coerceAtLeast(0f)
+        val v = content()
+        v?.animate()?.cancel(); v?.alpha = 0f
         docked.value = false
-        val w = widthPx.floatValue + dp(12f)
-        val h = w / aspect()
-        val y = l.y.toFloat().coerceIn(topMargin(), (screenH() - h - bottomMargin()).coerceAtLeast(topMargin()))
-        place(if (dockRight.value) (screenW() - w - dp(8f)).toInt() else dp(8f).toInt(), y.toInt())
+        place(x.toInt(), y.toInt())
         save()
+        if (v == null || !animateLook) { v?.alpha = 1f; return }
+        swapFade {
+            v.pivotX = if (right) w else 0f; v.pivotY = (l.y + dp(TAB_H) / 2 - y).coerceIn(0f, h)
+            v.scaleX = 0.82f; v.scaleY = 0.82f
+            v.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator(1.6f)).start()
+        }
     }
 
     internal fun openFull() {
@@ -604,10 +674,9 @@ object Overlay {
         // missing session must not stop it.
         val s = BackgroundOperation.state.value
         if (s.displayId == null && s.terminalPopAt <= 0L) return
-        runCatching { c.startActivity(Intent(c, FullscreenActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        // A lesson waiting to be saved opens its save pane; otherwise the live screen (a recording goes on there).
+        if (com.kilon.agentvscreen.cmd.Teach.result != null) Surface.openReview(c) else Surface.openLive(c)
     }
-
-    internal fun hitControl(x: Float, y: Float) = controls.values.any { it.contains(x, y) }
 
     private class OverlayOwner : LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
         private val reg = LifecycleRegistry(this)
@@ -859,6 +928,8 @@ private class GestureFrame(ctx: Context) : FrameLayout(ctx) {
 }
 
 private val PAD = 7.dp
+/** 1.3.0-beta18: one height for the title pill and the round buttons beside it. */
+private val CHIP_H = 24.dp
 
 /** Report a button's bounds so the gesture frame lets its taps through. */
 @Composable
@@ -928,13 +999,23 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
             BackgroundOperation.clearUndockRequest()
         }
     }
-    if (Overlay.docked.value) { DockTab(mode, Overlay.dockRight.value); return }
+    val waiting = pendingAsks()
+    // 1.4.0-beta10: a lesson waiting to be saved is a card too (it replaces the question it answers).
+    val lesson by com.kilon.agentvscreen.cmd.Teach.lesson.collectAsState()
+    val review = (lesson as? com.kilon.agentvscreen.cmd.Lesson.Review)?.result
+    // 1.4.0-beta11: getting ready / recording: the lesson strip hangs under the window (same place as a question card).
+    val showing = lesson is com.kilon.agentvscreen.cmd.Lesson.Ready || lesson is com.kilon.agentvscreen.cmd.Lesson.Recording
+    // Known before any placement, docked or not, so opening from the tab already counts the card.
+    androidx.compose.runtime.SideEffect { Overlay.cardShown.value = waiting.isNotEmpty() || review != null || showing }
+    if (Overlay.docked.value) { DockTab(mode, Overlay.dockRight.value, waiting.size + if (review != null || showing) 1 else 0); return }
     val density = LocalDensity.current
     val landscape = Overlay.aspect() > 1f
     LaunchedEffect(landscape) { Overlay.orientationChanged(landscape) }
     val w = with(density) { Overlay.widthPx.floatValue.toDp() }
     val h = w / Overlay.aspect()
-    val k = (w.value / 200f).coerceIn(0.75f, 1.15f)
+    // 1.4.0-beta4: the controls scale with the window's short side. Scaled by the width, a landscape window (wide,
+    // short) got the largest controls over the smallest picture height; now both orientations get the same size.
+    val k = (minOf(w.value, h.value) / 200f).coerceIn(0.75f, 1.15f)
     val corner = (14 + 6 * k).dp
 
     var left by remember { mutableLongStateOf(-1L) }
@@ -951,10 +1032,23 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
     LaunchedEffect(mode, s.page) {
         if (mode != Mode.TAKEOVER || s.page != BackgroundOperation.ViewPage.SCREEN) Overlay.closeImeBridge()
     }
+    val octx = LocalContext.current
     // Same text as the fullscreen page's second line (agentTitleText).
     val title = agentTitleText(s, left)
 
-    Box(Modifier.padding(PAD)) {
+    // 1.3.0-beta17: the controls sit ON the picture again (rainbow: no extra height above or below it), small and in
+    // the corners: title pill top left, full screen / close top right, stop / hand back / done at the bottom. They do
+    // not leak through: each is a hit target of its own (clickable or eatTouches), and Compose gives a touch only to
+    // the topmost thing it lands on, so the picture under them never gets it (never sent, never recorded). A question
+    // card still hangs OUTSIDE the window (below it, or above when there is no room below): a card over the picture
+    // would hide what the user has to tap.
+    val asking = waiting.firstOrNull()
+    // The last question stays composed while its card shrinks away.
+    var shownAsk by remember { mutableStateOf(asking) }
+    if (asking != null) shownAsk = asking
+    val chip = Color(0xCC12141C)
+
+    Column(Modifier.padding(PAD).width(w), verticalArrangement = Arrangement.spacedBy((6 * k).dp)) {
         Box(Modifier.width(w).height(h).glowBorder(mode, corner, pad = PAD - 1.dp)) {
             Box(
                 Modifier.fillMaxSize().clip(RoundedCornerShape(corner)).background(Palette.ink)
@@ -972,7 +1066,7 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                 Box(Modifier.fillMaxWidth().height((44 * k).dp).background(Brush.verticalGradient(listOf(Color(0x99000000), Color.Transparent))))
             }
 
-            // Title pill (drag handle while you hold the screen).
+            // Title pill: a handle (drag or hold it to move the window, also while you hold the screen).
             Row(
                 Modifier.align(Alignment.TopStart).padding(start = (8 * k).dp, top = (8 * k).dp).widthIn(max = w - (126 * k).dp)
                     .clip(RoundedCornerShape(50)).background(Color(0xCC12141C))
@@ -980,6 +1074,7 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                     .padding(horizontal = (8 * k).dp, vertical = (4 * k).dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // 1.4.0-beta15 (rainbow): no grip icon; the state dot already marks the pill, and the grip took room from the title.
                 Box(Modifier.size((7 * k).dp).clip(CircleShape).background(if (mode == Mode.ACTING) Brush.sweepGradient(Palette.rainbow) else Brush.linearGradient(listOf(Palette.of(mode), Palette.of(mode)))))
                 Spacer(Modifier.width((5 * k).dp))
                 // Long title scrolls sideways (marquee) instead of "…"; short titles stay still.
@@ -1003,19 +1098,9 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                     Color(0xCC12141C), k, "close") { Overlay.closeTapped() }
             }
 
-            // Stop the AI: its own labelled place, bottom left, only while the AI has the screen.
-            if (mode == Mode.ACTING || mode == Mode.STANDBY) {
-                Row(
-                    Modifier.align(Alignment.BottomStart).padding(start = (8 * k).dp, bottom = (8 * k).dp).control("stop")
-                        .clip(RoundedCornerShape(50)).background(Palette.stopped).clickable { BackgroundOperation.userStop() }
-                        .padding(horizontal = (10 * k).dp, vertical = (5 * k).dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Filled.Stop, null, tint = Color.White, modifier = Modifier.size((13 * k).dp))
-                    Spacer(Modifier.width((3 * k).dp))
-                    Text(tr("停止 AI", "Stop AI"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
+            // v18: the "停止 AI" pill is gone from the window (it covered the picture). Stop the AI from the
+            // app's home ("停止") or the full-screen page ("停止 AI"); long-pressing the picture to take over
+            // also freezes it at once.
 
             // Stopped: say what that means right on the window.
             if (mode == Mode.STOPPED) {
@@ -1037,36 +1122,18 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                 }
             }
 
-            // Take over at once (the explicit Fluid Cloud switch; the window is view-only by default), with a vibration.
-            // No screen: there is nothing to take over.
-            if (owner != null && mode != Mode.TAKEOVER && mode != Mode.STOPPED) {
-                Row(
-                    Modifier.align(Alignment.BottomEnd).padding(end = (8 * k).dp, bottom = (8 * k).dp).control("takeover")
-                        .clip(RoundedCornerShape(50)).background(Color(0xCC12141C)).clickable {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            if (s.userStopped) BackgroundOperation.userResume()
-                            BackgroundOperation.beginTakeover(owner)
-                        }
-                        .padding(horizontal = (10 * k).dp, vertical = (5 * k).dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Filled.TouchApp, null, tint = Color.White, modifier = Modifier.size((13 * k).dp))
-                    Spacer(Modifier.width((3 * k).dp))
-                    Text(tr("接管", "Take over"), color = Color.White, fontSize = (11 * k).sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
+            // v18: the "接管" pill is gone from the window (it covered the picture). Hold one finger still
+            // for 0.5 s on the picture to take over (the ring fills); the full-screen page and the app's
+            // home still have a 接管 button.
 
             // Messages: gesture hints.
             var now by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
             LaunchedEffect(Overlay.hintAt.longValue) { now = SystemClock.uptimeMillis(); delay(3100); now = SystemClock.uptimeMillis() }
             val hint = when {
-                Overlay.hintAt.longValue > 0 && now - Overlay.hintAt.longValue < 2500 -> tr("点“接管”或长按 1 秒接管 · “终端”看 shell 输出 · 双指缩放 · 拖到边缘收起 · × 关闭", "Tap “Take over” or hold 1 s to take over · “Terminal” shows shell output · pinch to resize · drag to an edge to dock · × closes")
+                Overlay.hintAt.longValue > 0 && now - Overlay.hintAt.longValue < 2500 -> tr("长按 1 秒接管 · “终端”看 shell 输出 · 双指缩放 · 拖到边缘收起 · × 关闭", "Hold 1 s to take over · “Terminal” shows shell output · pinch to resize · drag to an edge to dock · × closes")
                 else -> null
             }
-            AnimatedVisibility(hint != null, Modifier.align(Alignment.Center), enter = fadeIn(), exit = fadeOut()) {
-                Text(hint ?: "", color = Color.White, fontSize = (11 * k).sp,
-                    modifier = Modifier.padding(8.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xDD12141C)).padding(horizontal = 10.dp, vertical = 6.dp))
-            }
+            GestureHint(hint != null, Modifier.align(Alignment.Center), k, hint ?: "")
 
             // Hold-to-take-over ring.
             val p = Overlay.hold.floatValue
@@ -1083,6 +1150,135 @@ internal fun OverlayContent(fixed: BackgroundOperation.State? = null, picture: (
                     IntOffset((at.x - Overlay.frameRect.left).roundToInt() - 24, (at.y - Overlay.frameRect.top).roundToInt() - 24) }.size(16.dp))
             }
         }
+        val ease = androidx.compose.animation.core.tween<androidx.compose.ui.unit.IntSize>(Overlay.CARD_MS.toInt(), easing = androidx.compose.animation.core.LinearOutSlowInEasing)
+        // The card hangs below the window, outside the picture: without this its taps never reach it. The gesture
+        // frame only lets a touch through to the content when it lands on a registered control, on the picture, or
+        // on the title pill; a touch on the card is none of those, so it is swallowed and the card's buttons (the
+        // lesson strip, a question, a lesson waiting to be saved) never see it.
+        AnimatedVisibility(asking != null || review != null || showing,
+            modifier = Modifier.control("card"),
+            enter = androidx.compose.animation.expandVertically(ease, expandFrom = Alignment.Top) + fadeIn(androidx.compose.animation.core.tween(Overlay.CARD_MS.toInt())),
+            exit = androidx.compose.animation.shrinkVertically(ease, shrinkTowards = Alignment.Top) + fadeOut(androidx.compose.animation.core.tween(160))) {
+            val rv = review
+            if (showing && owner != null) androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth().eatTouches().glassDark(RoundedCornerShape((18 * k).dp))
+                .padding(horizontal = (12 * k).dp, vertical = (11 * k).dp)
+                .onSizeChanged { sz -> if (sz.height.toFloat() != Overlay.cardH.floatValue) { Overlay.cardH.floatValue = sz.height.toFloat() }; Overlay.fitGroup() }) {
+                LessonStrip(owner, k, withHead = true, onSay = { Surface.openLive(octx, say = true) })
+            }
+            else if (asking == null && rv != null) ReviewQuick(rv, k, Modifier.fillMaxWidth()
+                .onSizeChanged { sz -> if (sz.height.toFloat() != Overlay.cardH.floatValue) { Overlay.cardH.floatValue = sz.height.toFloat() }; Overlay.fitGroup() })
+            else shownAsk?.let { a ->
+                // Measured at its full size from the first frame (the expansion only clips it), so the window starts
+                // its glide up at the same moment and lands as the card finishes growing.
+                AskQuick(a, waiting.size.coerceAtLeast(1), k, modifier = Modifier.fillMaxWidth()
+                    .onSizeChanged { sz -> if (sz.height.toFloat() != Overlay.cardH.floatValue) { Overlay.cardH.floatValue = sz.height.toFloat() }; Overlay.fitGroup() })
+            }
+        }
+    }
+}
+
+/**
+ * The picture. Taken over: a finger here IS a finger on the background screen from the moment it lands (UserTouch),
+ * cancelled (never tapped) when the window takes the touch back for a pinch. Not taken over: hold 0.5 s to take over
+ * (a ring shows it filling), a tap shows the gesture hint, a drag is the window's (the frame takes it).
+ */
+@Composable
+private fun PictureLayer(owner: String, k: Float, picture: (@Composable (String) -> Unit)?) {
+    var hold by remember { mutableFloatStateOf(0f) }
+    var holdAt by remember { mutableStateOf(Offset.Zero) }
+    val density = LocalDensity.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    Box(Modifier.fillMaxSize().pointerInput(owner) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            Overlay.pictureDown = true
+            val frame = RectF(0f, 0f, size.width.toFloat(), size.height.toFloat())
+            fun screen(p: Offset) = pictureToScreen(p.x.coerceIn(0f, frame.right - 1f), p.y.coerceIn(0f, frame.bottom - 1f), frame)
+            val st = BackgroundOperation.state.value
+            val taken = st.takeoverSessionId != null && st.takeoverSessionId == st.ownerSessionId
+            if (taken) {
+                val p0 = screen(down.position) ?: return@awaitEachGesture
+                if (!com.kilon.agentvscreen.core.UserTouch.down(owner, p0.first, p0.second)) return@awaitEachGesture
+                Overlay.pictureLive = true
+                var ended = false
+                try {
+                    while (true) {
+                        val ev = awaitPointerEvent()
+                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!ch.pressed) {
+                            if (!Overlay.frameClaimed) { val p = screen(ch.position); com.kilon.agentvscreen.core.UserTouch.up(p?.first ?: -1, p?.second ?: -1); ended = true }
+                            break
+                        }
+                        screen(ch.position)?.let { com.kilon.agentvscreen.core.UserTouch.move(it.first, it.second) }
+                        ch.consume()
+                    }
+                } finally {
+                    if (!ended) com.kilon.agentvscreen.core.UserTouch.cancel()
+                    Overlay.pictureLive = false
+                }
+            } else {
+                holdAt = down.position
+                val t0 = SystemClock.uptimeMillis()
+                var held = false
+                var up = false
+                try {
+                    while (true) {
+                        val ev = withTimeoutOrNull(16L) { awaitPointerEvent() }
+                        if (Overlay.frameClaimed) break
+                        if (!held) {
+                            hold = ((SystemClock.uptimeMillis() - t0 - 100L) / 400f).coerceIn(0f, 1f)
+                            if (hold >= 1f) {
+                                held = true; hold = 0f; Overlay.pictureHeld = true
+                                if (BackgroundOperation.state.value.userStopped) BackgroundOperation.userResume()
+                                BackgroundOperation.beginTakeover(owner)
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            }
+                        }
+                        if (ev == null) continue
+                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!ch.pressed) { up = true; break }
+                    }
+                } finally { hold = 0f }
+                if (up && !held && !Overlay.frameClaimed) Overlay.hintAt.longValue = SystemClock.uptimeMillis()
+            }
+        }
+    }) {
+        if (picture != null) picture(owner) else VScreenLiveFrame(owner, Modifier.fillMaxSize())
+
+        // Gesture hint (a tap on the picture while the AI has the screen).
+        var now by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
+        LaunchedEffect(Overlay.hintAt.longValue) { now = SystemClock.uptimeMillis(); delay(3100); now = SystemClock.uptimeMillis() }
+        val showHint = Overlay.hintAt.longValue > 0 && now - Overlay.hintAt.longValue < 2500
+        AnimatedVisibility(showHint, Modifier.align(Alignment.Center), enter = fadeIn(), exit = fadeOut()) {
+            // 1.3.0-beta18: one gesture per line (rainbow: three lines, not one run-on line).
+            Text(tr("长按 0.5 秒接管\n双指缩放\n拖出屏幕一半收起", "Hold 0.5 s to take over\nPinch to resize\nDrag half off screen to fold"), color = Color.White, fontSize = (11 * k).sp,
+                lineHeight = (16 * k).sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.padding(8.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xDD12141C)).padding(horizontal = 10.dp, vertical = 6.dp))
+        }
+
+        // Hold-to-take-over ring.
+        if (hold > 0f) {
+            val ringR = with(density) { (28 * k).dp.toPx() }
+            Canvas(Modifier.fillMaxSize()) {
+                drawCircle(Color(0x66000000), ringR + 6f, holdAt)
+                drawArc(Palette.takeover, -90f, 360f * hold, false, topLeft = Offset(holdAt.x - ringR, holdAt.y - ringR),
+                    size = androidx.compose.ui.geometry.Size(ringR * 2, ringR * 2), style = Stroke(width = 6f, cap = StrokeCap.Round))
+            }
+            Icon(Icons.Filled.PanTool, null, tint = Color.White, modifier = Modifier.offset { IntOffset(holdAt.x.roundToInt() - 24, holdAt.y.roundToInt() - 24) }.size(16.dp))
+        }
+    }
+}
+
+/**
+ * Gesture-hint toast over the picture. A file-scope helper (not inline in OverlayContent): inside the picture
+ * Box the compiler resolves an inline AnimatedVisibility call to the ColumnScope overload and rejects it
+ * ("cannot be called in this context with an implicit receiver"); here only the plain overload applies.
+ */
+@Composable
+private fun GestureHint(visible: Boolean, modifier: Modifier = Modifier, k: Float, text: String) {
+    AnimatedVisibility(visible, modifier, enter = fadeIn(), exit = fadeOut()) {
+        Text(text, color = Color.White, fontSize = (11 * k).sp,
+            modifier = Modifier.padding(8.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xDD12141C)).padding(horizontal = 10.dp, vertical = 6.dp))
     }
 }
 
@@ -1237,9 +1433,28 @@ internal fun TerminalEntryView(e: VScreenTerminal.Entry, k: Float, collapsible: 
  * colour as the big window (rainbow while the AI acts) — the app's own mark, so it reads as "the background screen".
  */
 @Composable
-private fun DockTab(mode: Mode, right: Boolean) {
+internal fun DockTab(mode: Mode, right: Boolean, asking: Int = 0) {
     val shape = if (right) RoundedCornerShape(topStart = 30.dp, bottomStart = 30.dp) else RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp)
     val glass = listOf(Color(0xF0262A38), Color(0xF014161F))
+    // 1.3 beta2: an agent is waiting for an answer: the folded tab says so by itself (the user may never open the
+    // notification shade). Amber, pulsing, with a question mark where the little phone is: unlike standby and acting.
+    if (asking > 0) {
+        // 1.3 beta3: the same glass as the window, an orchid edge that breathes, and the question mark in its place.
+        val pulse = if (animateLook) {
+            val t = androidx.compose.animation.core.rememberInfiniteTransition(label = "ask")
+            t.animateFloat(0.35f, 1f, androidx.compose.animation.core.infiniteRepeatable(androidx.compose.animation.core.tween(900), androidx.compose.animation.core.RepeatMode.Reverse), label = "pulse").value
+        } else 1f
+        Box(
+            Modifier.width(Overlay.TAB_W.dp).height(Overlay.TAB_H.dp)
+                .shadow(14.dp, shape, ambientColor = Palette.asking, spotColor = Palette.asking)
+                .glassDark(shape)
+                .border(1.5.dp, Brush.verticalGradient(listOf(Color(0xFF8B7CFF).copy(alpha = pulse), Palette.asking.copy(alpha = pulse))), shape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(Modifier.offset(x = if (right) 2.dp else (-2).dp)) { AskMark(18f, asking, 0.55f + 0.45f * pulse) }
+        }
+        return
+    }
     Box(
         Modifier.width(Overlay.TAB_W.dp).height(Overlay.TAB_H.dp)
             .shadow(10.dp, shape)

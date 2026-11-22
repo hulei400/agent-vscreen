@@ -3,7 +3,6 @@ package com.kilon.agentvscreen.cmd
 import android.content.Context
 import android.graphics.Bitmap
 import java.io.File
-import java.io.FileOutputStream
 
 /** One command call: the words after `vscreen`, and the caller's session (one session owns the screen at a time). */
 data class NativeOffloadRequest(val argv: List<String>, val sessionId: String?)
@@ -29,9 +28,15 @@ class Call(val session: String, val tokenId: String = "main", val tokenName: Str
            val scopes: Set<String> = setOf("look", "operate", "system"), val peer: String? = null,
            val requestId: String? = null, val lang: String? = null,
            /** The user gave this token a period without confirmations (epoch ms; 0 = none). */
-           val trustUntil: Long = 0L) {
+           val trustUntil: Long = 0L,
+           /** 1.4: how the caller reaches us (shell CLI, MCP, raw HTTP): texts for the agent name commands its way. */
+           val via: com.kilon.agentvscreen.api.Abilities.Via = com.kilon.agentvscreen.api.Abilities.Via.CLI) {
     /** Set when the caller went away or cancelled the task: the command stops before its next step. */
     @Volatile var cancelled = false
+    /** 1.3: when the phone received the call (wall clock), to tell phone-side time from time outside the phone. */
+    val receivedAt: Long = System.currentTimeMillis()
+    /** 1.3: set when this call runs as a task (--async): nobody is holding a connection open for it. */
+    @Volatile var taskId: String? = null
     /** Told each finished step while a long command runs (MCP progress, task status). */
     @Volatile var progress: ((String) -> Unit)? = null
     /** Steps reported so far (task status shows the last one). */
@@ -65,7 +70,7 @@ class Notes {
     val isEmpty: Boolean get() = list.isEmpty()
     /** The code that decides the reply's outcome: the first coded note that is not mere information. */
     fun firstBlocking(): String? = list.firstOrNull { it.code != null && Codes.of(it.code)?.next != Codes.Next.NONE && it.code !in INFO }?.code
-    companion object { val INFO = setOf("NO_CHANGE", "MAIN_SCREEN_CHANGED", "KEEP_LIMIT") }
+    companion object { val INFO = setOf("NO_CHANGE", "MAIN_SCREEN_CHANGED", "KEEP_LIMIT", "OCR_DOWN") }
 }
 
 /**
@@ -107,11 +112,16 @@ object ShotStore {
 
     fun dir(ctx: Context): File = File(ctx.filesDir, "shots").apply { mkdirs() }
 
-    fun save(ctx: Context, bmp: Bitmap, tag: String): String? = runCatching {
+    /**
+     * Keep [bmp] (already sized by the caller) as a picture for [use]. [sent]: it may go into a model context by
+     * itself, so its compact copy (Pictures.Use.SENT) is written now from the same pixels, not re-encoded later.
+     */
+    fun save(ctx: Context, bmp: Bitmap, tag: String, use: com.kilon.agentvscreen.core.Pictures.Use = com.kilon.agentvscreen.core.Pictures.Use.LOOK, sent: Boolean = false): String? = runCatching {
         val d = dir(ctx)
         val safeTag = tag.replace(Regex("[^A-Za-z0-9_-]"), "").take(24).ifEmpty { "shot" }
         val name = "vscreen_${safeTag}_${System.currentTimeMillis()}_${(Math.random() * 1e6).toInt()}.jpg"
-        FileOutputStream(File(d, name)).use { bmp.compress(Bitmap.CompressFormat.JPEG, 82, it) }
+        com.kilon.agentvscreen.core.Pictures.write(bmp, File(d, name), use, fit = false)
+        if (sent) runCatching { com.kilon.agentvscreen.core.Pictures.write(bmp, File(d, "vscreen_c" + name.removePrefix("vscreen")), com.kilon.agentvscreen.core.Pictures.Use.SENT) }
         d.listFiles()?.filter { it.name.startsWith("vscreen_") }?.sortedBy { it.lastModified() }
             ?.let { fs -> if (fs.size > KEEP) fs.take(fs.size - KEEP).forEach { it.delete() } }
         REF + name

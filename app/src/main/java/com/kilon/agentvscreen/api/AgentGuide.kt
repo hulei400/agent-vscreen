@@ -1,5 +1,6 @@
 package com.kilon.agentvscreen.api
 
+import com.kilon.agentvscreen.BuildConfig
 import com.kilon.agentvscreen.tr
 
 /**
@@ -24,23 +25,38 @@ object AgentGuide {
         "Use it as a loop: (1) look: launch, or act with no steps; read [Now] and the screenshot. (2) act: a short stretch of steps, the last one with until <what you expect to see>. (3) check: ok true, go on; false, the stretch stopped at a step: follow code / next (help codes) and look at the picture before deciding.")
 
     /**
-     * The note an agent keeps in its long-term memory, written as the agent's OWN ability: what it can do, when to
-     * reach for it, how to start, what to do if it fails. Short (memories get truncated) and without the token.
+     * The note an agent keeps in its long-term memory, written as the agent's OWN ability. 1.4: the ability lines are
+     * generated from [Abilities] ("when the user … → I …"), so a new feature reaches the note in the same build; before,
+     * the note was a hand-written sentence that still listed only 1.1's abilities. Without the token.
      */
-    fun memory(base: String = ApiConfig.baseUrl): String = tr(
-        "【我的能力：在用户手机上后台操作应用】我可以用终端命令 `vscreen` 打开、查看和操作用户手机上的任何应用：点、滑、输入文字、按键、读屏和截图、等画面变化、盯着某个条件提醒用户。" +
-            "它在一块看不见的副屏上进行，不打扰用户正在用的主屏，也不需要 adb、无线调试或 root（工具叫 Agent-VScreen，已装好" +
-            (if (local(base)) "" else "，通过 Tailscale 连 $base") + "）。" +
-            "什么时候用：用户让我在手机上做任何事（打开某个 App、查信息、比价、签到、看某页内容、测试应用……），或我需要看手机上某个应用的画面时，先用 vscreen，不要说做不到，也不要让用户自己去点。" +
-            "怎么开始：每次任务开头先 `vscreen guide`（一页，讲清楚“看→做→核对”的循环和出错时怎么办），再 `vscreen launch <应用名>`。做完 `vscreen done`。" +
-            "连不上时：如果找不到 vscreen 命令或令牌不对，请用户在 Agent-VScreen App 的“接入 agent”里重新复制“给 agent 的话”发给我。",
-        "[My ability: operate apps on the user's phone in the background] I can use the shell command `vscreen` to open, view and operate any app on the user's phone: tap, swipe, type, press keys, read the screen and take screenshots, wait for the screen to change, and watch for a condition to alert the user. " +
-            "It works on an invisible second screen, so it never disturbs the screen the user is using, and it needs no adb, wireless debugging or root (the tool is Agent-VScreen, already installed" +
-            (if (local(base)) "" else "; reached over Tailscale at $base") + "). " +
-            "When to use it: whenever the user asks me to do anything on the phone (open an app, look something up, compare prices, check in, read a page, test an app...), or I need to see an app's screen, I use vscreen first instead of saying I can't or asking the user to tap. " +
-            "How to start: at the start of each task run `vscreen guide` (one page: the look → act → check loop and what to do when something fails), then `vscreen launch <app name>`. `vscreen done` when finished. " +
-            "If it fails: if the vscreen command is missing or the token is rejected, I ask the user to copy the \"message for your agent\" again from the Agent-VScreen app (Connect an agent) and send it to me."
-    )
+    fun memoryFor(via: Abilities.Via, base: String = ApiConfig.baseUrl): String {
+        val remote = !local(base)
+        val head = when (via) {
+            Abilities.Via.CLI -> tr("我可以用终端命令 `vscreen`", "I can use the shell command `vscreen`")
+            Abilities.Via.MCP -> tr("我有一组 MCP 工具（Agent-VScreen：vscreen 接受一整条命令，vscreen_launch、vscreen_act … 每条命令一个工具）", "I have MCP tools (Agent-VScreen: vscreen takes a whole command line; vscreen_launch, vscreen_act … one tool per command)")
+            Abilities.Via.HTTP -> tr("我可以调用 Agent-VScreen 的 HTTP 接口（POST $base/v2/run，${httpAuth(base)}，内容 {\"cmd\": \"<命令>\"}）", "I can call Agent-VScreen's HTTP API (POST $base/v2/run, ${httpAuth(base)}, body {\"cmd\": \"<command>\"})")
+        }
+        val start = when (via) {
+            Abilities.Via.CLI -> tr("每次任务开头先 `vscreen guide`（一页用法，以它为准），做完 `vscreen done`。", "at the start of each task run `vscreen guide` (one page of usage; it is the authority), and `vscreen done` when finished.")
+            Abilities.Via.MCP -> tr("每次任务开头调用 vscreen，命令填 guide（一页用法，以它为准），做完调用 vscreen_done。结果看 structuredContent 里的 ok / code / next。", "at the start of each task call vscreen with the command guide (one page of usage; it is the authority), and vscreen_done when finished. Results: ok / code / next in structuredContent.")
+            Abilities.Via.HTTP -> tr("每次任务开头先发 {\"cmd\": \"guide\"}（一页用法，以它为准），做完发 done。回复是 JSON：ok / code / next 说明结果。", "at the start of each task send {\"cmd\": \"guide\"} (one page of usage; it is the authority), and done when finished. Replies are JSON: ok / code / next tell the result.")
+        }
+        val lines = Abilities.all.joinToString("\n") { "- " + it.whenText + " → " + Abilities.forVia(it.can, via) }
+        return tr(
+            "【我的能力：在用户手机上后台操作应用（Agent-VScreen ${BuildConfig.VERSION_NAME}）】$head，在一块看不见的副屏上打开、查看和操作用户手机上的任何应用，不打扰用户正在用的主屏，不需要 adb、无线调试或 root" +
+                (if (remote) "（通过 Tailscale 连 $base）" else "") + "。遇到下面这些情况就用它，不要说做不到，也不要让用户自己去点：\n$lines\n" +
+                "怎么开始：$start\n" +
+                "保持最新：Agent-VScreen 更新后，它的回复里会带一段新的说明，用那段替换这段，再执行 remembered。连不上或令牌被拒时，请用户在 App 的“接入”里重新复制“给 agent 的话”给我。\n" +
+                "我的身份：这个令牌只属于我；手机上的记录、任务、提问、定时和盯守按 agent 分开，我只管得到自己的。",
+            "[My ability: operate apps on the user's phone in the background (Agent-VScreen ${BuildConfig.VERSION_NAME})] $head to open, view and operate any app on the user's phone on an invisible second screen, without disturbing the screen the user is using, and with no adb, wireless debugging or root" +
+                (if (remote) " (reached over Tailscale at $base)" else "") + ". I use it in these situations instead of saying I can't or asking the user to tap:\n$lines\n" +
+                "How to start: $start\n" +
+                "Staying current: after Agent-VScreen updates, its reply carries a new version of this note; I replace this one with it and run remembered. If it cannot be reached or the token is rejected, I ask the user to copy my \"message for your agent\" again from the Agent-VScreen app (Connect) and send it to me.\n" +
+                "My identity: this token is mine alone; the phone keeps records, tasks, questions, bookings and watches per agent, and I can reach only mine.",
+        )
+    }
+
+    fun memory(base: String = ApiConfig.baseUrl): String = memoryFor(Abilities.Via.CLI, base)
 
     /** How a caller without the CLI proves its token: Bearer on this phone, a signature from another device. */
     private fun httpAuth(base: String): String = if (local(base)) tr("请求头 Authorization: Bearer <令牌>", "header Authorization: Bearer <token>")
@@ -49,27 +65,25 @@ object AgentGuide {
             "requests from another device are signed (the token does not travel): headers X-VScreen-Key: <the id after avs_ in the token; main for an old-style token>, X-VScreen-Time: <unix seconds>, X-VScreen-Nonce: <12+ random letters/digits>, " +
             "X-VScreen-Sign: sha256hex(K\\ntime\\nnonce\\nPOST\\n/v2/run\\nsha256hex(body)\\nK), where K = sha256hex(the secret part of the token)")
 
-    /** The same note for agents that call the HTTP API. */
-    fun memoryHttp(base: String = ApiConfig.baseUrl): String = tr(
-        "【我的能力：在用户手机上后台操作应用】我可以调用 Agent-VScreen 的 HTTP 接口打开、查看和操作用户手机上的任何应用（点、滑、输入、读屏截图、等画面变化）：" +
-            "POST $base/v2/run，${httpAuth(base)}，内容 {\"cmd\": \"launch 设置\"}。回复是 JSON：ok / code / next 说明结果，steps、screen.elements、notes 是结构化内容，text 是同样内容的文字。它在看不见的副屏上进行，不打扰用户主屏，不需要 adb。" +
-            "什么时候用：用户让我在手机上做任何事，或我需要看手机上某个应用的画面时，先用它，不要说做不到。每次任务开头先发 {\"cmd\": \"guide\"} 看用法。" +
-            "令牌是接入时用户给我的；没有或被拒，就请用户在 Agent-VScreen App 的“接入 agent”里重新复制“给 agent 的话”。",
-        "[My ability: operate apps on the user's phone in the background] I can call Agent-VScreen's HTTP API to open, view and operate any app on the user's phone (tap, swipe, type, read the screen and screenshots, wait for changes): " +
-            "POST $base/v2/run, ${httpAuth(base)}, body {\"cmd\": \"launch Settings\"}. The reply is JSON: ok / code / next tell the result; steps, screen.elements and notes are structured; text is the same content in words. It works on an invisible second screen, never disturbs the user's screen, and needs no adb. " +
-            "When to use it: whenever the user asks me to do anything on the phone, or I need to see an app's screen, I use it first instead of saying I can't. At the start of each task send {\"cmd\": \"guide\"} for the usage. " +
-            "The token is the one the user gave me when connecting; if I don't have it or it is rejected, I ask the user to copy the \"message for your agent\" again from the Agent-VScreen app (Connect an agent)."
-    )
+    fun memoryHttp(base: String = ApiConfig.baseUrl): String = memoryFor(Abilities.Via.HTTP, base)
 
-    /** The note for agents that use the MCP tools. */
-    fun memoryMcp(): String = tr(
-        "【我的能力：在用户手机上后台操作应用】我有一组 MCP 工具（Agent-VScreen：vscreen_launch、vscreen_act、vscreen_status …，以及接受一整条命令行的 vscreen），可以打开、查看和操作用户手机上的任何应用：点、滑、输入、读屏截图、等画面变化、盯着某个条件。" +
-            "它在看不见的副屏上进行，不打扰用户主屏，不需要 adb。什么时候用：用户让我在手机上做任何事，或我需要看手机上某个应用的画面时，先用它，不要说做不到。" +
-            "怎么开始：每次任务开头调用 vscreen，命令填 guide 看用法；然后 vscreen_launch 打开应用，vscreen_act 做一小段并核对结果（structuredContent 里的 ok / code / next），做完调用 vscreen_done。",
-        "[My ability: operate apps on the user's phone in the background] I have a set of MCP tools (Agent-VScreen: vscreen_launch, vscreen_act, vscreen_status …, and vscreen, which takes a whole command line) that open, view and operate any app on the user's phone: tap, swipe, type, read the screen and screenshots, wait for changes, watch for a condition. " +
-            "It works on an invisible second screen, never disturbs the user's screen, and needs no adb. When to use it: whenever the user asks me to do anything on the phone, or I need to see an app's screen, I use it first instead of saying I can't. " +
-            "How to start: at the start of each task call vscreen with the command guide for the usage; then vscreen_launch opens an app, vscreen_act does a short stretch and I check the result (ok / code / next in structuredContent); vscreen_done when finished."
-    )
+    fun memoryMcp(): String = memoryFor(Abilities.Via.MCP)
+
+    /** The "what you can do" section of the guide, generated from [Abilities]. */
+    private fun abilitySection(): String = tr("### 六、能做的事：遇到什么情况用哪个\n", "### 6. What you can do: which situation calls for what\n") +
+        Abilities.all.joinToString("\n") { "- " + tr("当", "When ") + it.whenText + tr("：", ": ") + it.how } + "\n\n"
+
+    /** Operit's tool advice (written into integrations/operit by AbilitiesTest). Plain lines, no Markdown headings. */
+    fun advice(): String = tr("Agent-VScreen 使用建议：\n", "Agent-VScreen advice:\n") +
+        tr("- 用户要你在手机上做事时，用 vscreen 在后台副屏上做；不要动用户的主屏，也不要用 adb、screencap、input 代替。\n",
+            "- When the user asks for anything on the phone, do it with vscreen on the background screen; don't touch the user's screen, and don't use adb, screencap or input instead.\n") +
+        tr("- 每次任务开头调用 vscreen，命令填 guide（一页用法）；提示缺令牌时，请用户在 Agent-VScreen › 接入 › 新建接入（或 设置 › 令牌）里生成令牌，再用 vscreen_configure 保存。\n",
+            "- At the start of each task call vscreen with the command guide (one page of usage); if it says the token is missing, ask the user to create one in Agent-VScreen › Connect › Connect an agent (or Settings › Tokens), then save it with vscreen_configure.\n") +
+        "- " + loop() + "\n" +
+        tr("- 付款等高风险步骤由用户在手机上确认（CONFIRM_PENDING：请用户去手机上确认再重发；USER_DENIED：不要重试）；USER_STOPPED 时停下并转告怎么解除。\n",
+            "- High-risk steps such as paying are confirmed by the user on the phone (CONFIRM_PENDING: ask the user to confirm there, then send again; USER_DENIED: don't retry); on USER_STOPPED stop and pass on how to undo it.\n") +
+        tr("遇到这些情况：\n", "When:\n") +
+        Abilities.all.joinToString("\n") { "- " + it.whenText + " → " + Abilities.forVia(it.can, Abilities.Via.MCP) }
 
     /**
      * What the user sends to the agent (copied by the app). The user asks, so the agent does it: install, keep the note
@@ -128,7 +142,7 @@ Please connect Agent-VScreen so that from now on you can open and operate apps o
 
 1. 把这段加进你的 MCP 配置（streamable HTTP）：
 ${ApiConfig.mcpJson(base, token)}
-""" + (if (local(base)) "" else "（MCP 客户端不会给请求签名：从其它设备用 MCP 接入时，我需要在 Agent-VScreen › 其它设备 里关掉“只接受签名请求”。连接被拒绝时提醒我。）\n") + """
+""" + (if (local(base)) "" else "（MCP 客户端不会给请求签名：手机用“内置”Tailscale 时不需要签名；用“外部 App”方式时，我需要在 Agent-VScreen › 其它设备 里关掉“只接受签名请求”。连接被拒绝时提醒我。）\n") + """
 2. 把下面这段话存进你的长期记忆（或建成一个 skill / 规则）。这是我的要求：以后的新对话里，你也要知道自己有这个能力，我让你在手机上做事时直接用它。
 「${memoryMcp()}」
 
@@ -138,7 +152,7 @@ Please connect Agent-VScreen so that from now on you can open and operate apps o
 
 1. Add this to your MCP config (streamable HTTP):
 ${ApiConfig.mcpJson(base, token)}
-""" + (if (local(base)) "" else "(MCP clients do not sign requests: to use MCP from another device I have to turn off \"signed requests only\" under Other devices in Agent-VScreen. Remind me if the connection is refused.)\n") + """
+""" + (if (local(base)) "" else "(MCP clients do not sign requests: with the built-in Tailscale none is needed; with the external Tailscale app I have to turn off \"signed requests only\" under Other devices in Agent-VScreen. Remind me if the connection is refused.)\n") + """
 2. Save the text below in your long-term memory (or as a skill / rule). This is my request: in future conversations you should know you have this ability and use it directly when I ask you to do something on my phone.
 "${memoryMcp()}"
 
@@ -174,14 +188,16 @@ ${ApiConfig.mcpJson(base, token)}
 
 ### 二、怎么写一段
 - 目标三种写法：`tap 登录`（画面上的字）、`tap #3`（【现在】列表的编号）、`tap 540 1200`（坐标，截图边上有刻度）。字会变或有好几处一样的字时用编号或坐标。
-- 步骤：tap | press（长按）| swipe x1 y1 x2 y2 | drag | scroll down/up | type 文字（先 tap 输入框）| key back/enter | wait 条件 | wait 2s | use 段名。
+- 步骤：tap | press（长按）| swipe x1 y1 x2 y2 | drag | scroll down/up | type 文字（先 tap 输入框；`type "文字" slow` 逐字输入，给边打边搜的框）| key back/enter，组合键 key ctrl+a / shift+tab | wait 条件 | wait 2s | use 段名。
+- 字里 `*` 是任意字（`tap *蓝牙*` 点含“蓝牙”的那项），`字@2` 是从上往下第 2 处。流程：`try 一步`（没找到就跳过）、`if text:关闭 { tap 关闭 } else { … }`、`repeat 5 { scroll down }`、`repeat { scroll down } until text:到底了`。存成段：`note save 名字 "步骤"`（不执行，示教的段也能这样改写），用 `use 名字 参数`。示教存的段带一张关键步骤缩略图：teach 的回复里附上，之后用 `note show 名字` 再看。
 - 条件：text:字（出现）| gone:字（消失）| change（画面变了）| stable（稳定）| app:包名或界面名。
 - 例：`vscreen act "tap 搜索; type 耳机; key enter until text:综合"`。
-- 选项：`--fast` 动作之间不等画面（游戏、连点）；`--stop 条件` 整段盯着，出现就停；`--watch 3s` 做完再看一会儿；`--async` 长操作先返回任务号，之后 `vscreen task <号> --wait 60s` 取结果。
+- 选项：`--human` 仿人节奏（动作前随机停顿、点击略偏、时长有波动、打字分小段，给对机器节奏敏感的应用；`note human on` 让这个应用一直这样）；`--fast` 动作之间不等画面（游戏、连点）；`--stop 条件` 整段盯着，出现就停；`--watch 3s` 做完再看一会儿；`--async` 长操作先返回任务号，之后 `vscreen task <号> --wait 60s` 取结果。
 
 ### 三、回复怎么读
-四块：【做了什么】每步的事实；【这段时间】你上次看之后画面上出现 / 消失了什么（包括你思考的时间）；【现在】前台界面、截图路径、编号元素；【注意】以代码开头的提示。
+四块：【做了什么】每步的事实；【这段时间】你上次看之后画面上出现 / 消失了什么（包括你思考的时间），拼图里每个动作前一张、圈出你点的位置；【现在】前台界面、截图路径、编号元素；【注意】以代码开头的提示。
 HTTP / MCP 的回复里同样的内容是结构化的：ok、code、next、steps[]、screen.elements[]、notes[]。
+点了没效果或结果不对时，先看拼图里圈的位置对不对；要看更多帧：`vscreen frames`（默认上一次那段；--every 0.3s 更密，--last 2m 更长，--from 14:03:10 指定一段）。
 
 ### 四、没成功时怎么办（看代码的“下一步”，完整的表：`vscreen help codes`）
 - 先看画面再决定（look）：STEP_MISSED 没等到期待的结果；NOT_FOUND 找不到字（回复里列了相近的字和坐标）；STALE_ELEMENT 编号对应的元素已经不在了（用新列表）；TYPE_FAILED / FOCUS_ELSEWHERE 字没进输入框（先点输入框）；REREAD_REQUIRED 用户刚接管过；NO_CHANGE 点了但画面没变（可能没点中）。同一种做法失败两次就换一种（换坐标、先滚动、返回上一页），不要原样重试。
@@ -194,17 +210,7 @@ HTTP / MCP 的回复里同样的内容是结构化的：ok、code、next、steps
 - 涉及隐私的内容（私信、通讯录、相册、余额），先问用户再看。
 - 需要用户本人做的一步（密码、验证码、人脸）：`vscreen handoff out` 把应用交到用户主屏，告诉用户做什么。
 
-### 六、常用做法
-- 在应用里搜索：launch → tap 搜索框 → type → key enter until text:<结果页会有的字>。
-- 读很长的列表：`vscreen collect --pages 10`（自动翻页，返回去重后的文字）。
-- 看不清的小字 / 图标：`vscreen zoom x1,y1,x2,y2`；画面上没有字可点（游戏、画布）：`vscreen spots` 找可点的色块。
-- 等一件以后才发生的事：`vscreen act --stop "text:到货" --keep notify`（看到就通知用户），或 `--keep wake` 之后 `vscreen events --wait 60s` 取。告诉用户你在盯什么、盯多久。
-- 每段前后都要做的固定动作（游戏的继续 / 暂停、反复弹出的窗口）：`vscreen note before "<步骤>"`、`vscreen note after "<步骤>"` 记一次，之后每段 act 自动做。
-- 这个应用的经验（哪个入口、哪里容易点错）：`vscreen note <一句话>`，下次 launch 会列给你。重复用的一段：act 加 `--save 名字`，之后 `use 名字`。
-- 让用户知道你在做什么：`vscreen title "在搜耳机"`。做完：`vscreen done`（副屏让出，页面保留）。
-- 出了怪问题：`vscreen status` 看状态，`vscreen fix` 按提示修，`vscreen diag` 导出诊断给开发者。
-
-完整说明：`vscreen help all`；单条命令：`vscreen help act`。
+""" + abilitySection() + """完整说明：`vscreen help all`；单条命令：`vscreen help act`。
 """, """
 ## Phone background screen (Agent-VScreen)
 You can use the `vscreen` command to operate apps on the phone on an invisible second screen while the user keeps using their own. Use it whenever the user asks you to open / look at / operate an app.
@@ -218,14 +224,16 @@ No adb or wireless debugging is needed; don't set them up. With no screen, just 
 
 ### 2. Writing a stretch
 - Three ways to name a target: `tap Login` (text on the screen), `tap #3` (number in the [Now] list), `tap 540 1200` (coordinates; the screenshot has rulers). When text changes or appears in several places, use the number or coordinates.
-- Steps: tap | press (long press) | swipe x1 y1 x2 y2 | drag | scroll down/up | type text (tap the input box first) | key back/enter | wait <condition> | wait 2s | use <segment>.
+- Steps: tap | press (long press) | swipe x1 y1 x2 y2 | drag | scroll down/up | type text (tap the input box first; `type "text" slow` types one character at a time, for search-as-you-type boxes) | key back/enter, shortcuts key ctrl+a / shift+tab | wait <condition> | wait 2s | use <segment>.
+- `*` in words is any characters (`tap *Bluetooth*` taps the item holding it), `words@2` is the 2nd place from the top. Flow: `try <step>` (skipped if not found), `if text:Close { tap Close } else { … }`, `repeat 5 { scroll down }`, `repeat { scroll down } until text:End`. Save as a segment: `note save <name> "steps"` (not run; rewrites a taught one too), run with `use <name> <values>`. A taught segment keeps a contact sheet of its key steps: attached to the teach reply, and again with `note show <name>`.
 - Conditions: text:word (appears) | gone:word (disappears) | change (the picture changed) | stable (settled) | app:package or screen name.
 - Example: `vscreen act "tap Search; type headphones; key enter until text:Results"`.
-- Options: `--fast` no waiting between actions (games, rapid taps); `--stop <condition>` watched for the whole stretch, stops when seen; `--watch 3s` keep looking after the steps; `--async` for long work: returns a task id, fetch the result with `vscreen task <id> --wait 60s`.
+- Options: `--human` human pacing (random pause before actions, taps slightly off-centre, varied durations, typing in small pieces, for apps sensitive to machine timing; `note human on` keeps it for the app); `--fast` no waiting between actions (games, rapid taps); `--stop <condition>` watched for the whole stretch, stops when seen; `--watch 3s` keep looking after the steps; `--async` for long work: returns a task id, fetch the result with `vscreen task <id> --wait 60s`.
 
 ### 3. Reading a reply
-Four blocks: [Done] the facts of each step; [Meanwhile] what appeared / disappeared since your last look (your thinking time included); [Now] the front screen, the screenshot path, numbered elements; [Notes] hints that start with a code.
+Four blocks: [Done] the facts of each step; [Meanwhile] what appeared / disappeared since your last look (your thinking time included), with a sheet of one frame before each action and where you touched circled; [Now] the front screen, the screenshot path, numbered elements; [Notes] hints that start with a code.
 Over HTTP / MCP the same content is structured: ok, code, next, steps[], screen.elements[], notes[].
+When a tap did nothing or the result is wrong, first check where the ring on the sheet is; for more frames: `vscreen frames` (the last stretch by default; --every 0.3s denser, --last 2m longer, --from 14:03:10 a given stretch).
 
 ### 4. When it did not work (follow the code's "next"; the full table: `vscreen help codes`)
 - Look at the screen before deciding (look): STEP_MISSED the expected result never came; NOT_FOUND the text is not there (the reply lists similar text with coordinates); STALE_ELEMENT the numbered element is gone (use the new list); TYPE_FAILED / FOCUS_ELSEWHERE the text did not go into an input box (tap the box first); REREAD_REQUIRED the user just had the screen; NO_CHANGE tapped but nothing changed (possibly missed). After two failures of the same approach, change it (coordinates, scroll first, go back) instead of repeating it.
@@ -238,16 +246,6 @@ Over HTTP / MCP the same content is structured: ok, code, next, steps[], screen.
 - Private content (messages, contacts, photos, balances): ask the user before looking.
 - A step only the user can do (password, code, face): `vscreen handoff out` puts the app on the user's screen; tell them what to do.
 
-### 6. Recipes
-- Search inside an app: launch → tap the search box → type → key enter until text:<a word the results page will have>.
-- Read a long list: `vscreen collect --pages 10` (pages through it, returns the text without repeats).
-- Small text / icons you can't read: `vscreen zoom x1,y1,x2,y2`; nothing with text to tap (games, canvas): `vscreen spots` finds tappable color patches.
-- Wait for something that happens later: `vscreen act --stop "text:In stock" --keep notify` (the user is notified when seen), or `--keep wake` and collect with `vscreen events --wait 60s`. Tell the user what you watch and for how long.
-- Fixed actions around every stretch (resume / pause a game, a popup that keeps coming back): keep them once with `vscreen note before "<steps>"` and `vscreen note after "<steps>"`; every act then runs them.
-- What you learned about this app (which entry to use, where taps go wrong): `vscreen note <one sentence>`; the next launch lists it. A stretch you repeat: add `--save name` to act, then `use name`.
-- Let the user see what you are doing: `vscreen title "searching headphones"`. When finished: `vscreen done` (the screen is freed, the page kept).
-- Something odd: `vscreen status` shows the state, `vscreen fix` repairs what it can, `vscreen diag` exports diagnostics for the developer.
-
-Full reference: `vscreen help all`; one command: `vscreen help act`.
+""" + abilitySection() + """Full reference: `vscreen help all`; one command: `vscreen help act`.
 """).trim()
 }

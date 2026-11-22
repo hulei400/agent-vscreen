@@ -16,6 +16,19 @@ class VScreenAccessibilityService : AccessibilityService() {
     companion object {
         @Volatile private var instance: VScreenAccessibilityService? = null
         fun getInstance(): VScreenAccessibilityService? = instance
+
+        /**
+         * 1.3: when the windows (a new page) or their content last changed, per display (elapsedRealtime; key -1 =
+         * display unknown on this system). A wait after an action uses it to know the app reacted, and an element
+         * number to know the page it was given on is gone.
+         */
+        private val stateAt = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+        private val contentAt = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+        private val displayOf: java.lang.reflect.Method? = runCatching { AccessibilityEvent::class.java.getMethod("getDisplayId") }.getOrNull()
+        fun pageChangedAt(displayId: Int): Long = maxOf(stateAt[displayId] ?: 0L, if (displayOf == null) stateAt[-1] ?: 0L else 0L)
+        fun contentChangedAt(displayId: Int): Long = maxOf(contentAt[displayId] ?: 0L, pageChangedAt(displayId), if (displayOf == null) contentAt[-1] ?: 0L else 0L)
+        /** Whether events carry their display here (else changes on any display count). */
+        val knowsDisplay: Boolean get() = displayOf != null
     }
 
     override fun onServiceConnected() {
@@ -30,7 +43,15 @@ class VScreenAccessibilityService : AccessibilityService() {
     }
     override fun onUnbind(intent: android.content.Intent?): Boolean { instance = null; A11yHeal.onLost(applicationContext); com.kilon.agentvscreen.ui.Overlay.rehost(); return super.onUnbind(intent) }
     override fun onDestroy() { instance = null; super.onDestroy() }
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val e = event ?: return
+        val id = runCatching { displayOf?.invoke(e) as? Int }.getOrNull() ?: -1
+        val now = android.os.SystemClock.elapsedRealtime()
+        when (e.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> stateAt[id] = now
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> contentAt[id] = now
+        }
+    }
     override fun onInterrupt() {}
 
     fun rootNodesForDisplay(displayId: Int): List<AccessibilityNodeInfo> {

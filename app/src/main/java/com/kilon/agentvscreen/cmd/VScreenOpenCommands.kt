@@ -16,7 +16,6 @@ import com.kilon.agentvscreen.core.VScreenMap
 import com.kilon.agentvscreen.core.VScreenPerception
 import com.kilon.agentvscreen.core.VScreenRemoteDisplay
 import com.kilon.agentvscreen.core.VScreenShell
-import com.kilon.agentvscreen.core.VScreenStore
 import com.kilon.agentvscreen.core.Vendor
 import kotlin.math.roundToInt
 import com.kilon.agentvscreen.cmd.VScreenOffloadHandler.Companion.TAG
@@ -71,7 +70,7 @@ internal fun VScreenOffloadHandler.doLaunch(sid: String, pkg: String, orient: Bo
         VScreenPerception.ensure(d)
         // Wait for a still, non-blank picture (at most 10 s): facts, not a readiness verdict.
         val t0 = SystemClock.elapsedRealtime()
-        val p = Probe(this, d, listOf(Cond("stable", "stable")))
+        val p = Probe(this, d, listOf(Cond("stable", CondKind.STABLE)))
         var w: WaitOut
         try {
             while (true) {
@@ -95,7 +94,8 @@ internal fun VScreenOffloadHandler.doLaunch(sid: String, pkg: String, orient: Bo
             if (depth == 0 && d.rotation % 2 == 1) needRefit = !BackgroundOperation.nativeLandscape(d)
             val gs = VScreenShell.windowScale(d.displayId, pkg)
             val crop = VScreenDownscale.surfaceCrop(pkg)
-            if (depth == 0 && needRefit == null && ((gs != null && gs > 1.02) || crop?.cropped == true)) needUnscale = gs ?: 1.0
+            val late = restart && VScreenDownscale.consumeLateScaled(pkg)
+            if (depth == 0 && needRefit == null && ((gs != null && gs > 1.02) || crop?.cropped == true || late)) needUnscale = gs ?: 1.0
             if (depth > 0 && ((gs != null && gs > 1.02) || crop?.cropped == true))
                 facts.notes += run { val x = gs?.let { "%.2f".format(it) } ?: "?"; tr("处理后 $pkg 仍被系统缩放（$x 倍），画面右侧/下方可能被裁。用户可手动：", "After the fix $pkg is still scaled by the system (×$x); the right/bottom of the picture may be cut off. The user can do it by hand: ") } + Vendor.current.downscaleHint()
         }
@@ -149,8 +149,10 @@ internal fun VScreenOffloadHandler.handoffSkip(): Set<String> =
 internal fun VScreenOffloadHandler.handoffCmd(sid: String?, args: OffloadArgs): NativeOffloadResult {
     val s = sid ?: throw ActionError("NO_SESSION", tr("没有会话（请求头 X-VScreen-Session）", "No session (header X-VScreen-Session)"))
     return when (val op = args.positional.getOrNull(0)) {
-        "in" -> handoffIn(s, args.positional.getOrNull(1))
-        "out" -> handoffOut(s, args.positional.getOrNull(1), args.get("note"))
+        // 1.4.0-beta8 (test: `handoff out 时钟` said no task, the package name worked; launch takes names): an app is
+        // named the same way in every command, by its name or its package.
+        "in" -> handoffIn(s, args.positional.getOrNull(1)?.let { VScreenKnowledge.resolveApp(it) ?: it })
+        "out" -> handoffOut(s, args.positional.getOrNull(1)?.let { VScreenKnowledge.resolveApp(it) ?: it }, args.get("note"))
         else -> {
             val skip = handoffSkip()
             val main = VScreenHandoff.tasksOn(0)
@@ -167,8 +169,7 @@ private fun VScreenOffloadHandler.handoffIn(sid: String, pkgArg: String?): Nativ
         ?: throw ActionError("HANDOFF_NO_TASK", tr("主屏上没有 $pkgArg 的任务。可以 launch $pkgArg 在副屏另开一份（不带用户的页面）", "No task of $pkgArg on the main screen. launch $pkgArg opens a separate copy on the screen (without the user's page)"))
     else main.firstOrNull { it.pkg !in handoffSkip() }
         ?: throw ActionError("HANDOFF_NO_TASK", tr("主屏最近没有可接手的应用（只有桌面和 Agent-VScreen 自己）：请用户先打开那个应用，或说是哪个应用", "No app on the main screen to take over (only the launcher and Agent-VScreen): ask the user to open that app first, or to say which one"))
-    if (VScreenStore.ruleFor(pick.pkg) == VScreenStore.Rule.BLOCK)
-        throw ActionError("APP_BLOCKED", tr("用户禁止后台操作 ${pick.pkg}（Agent-VScreen › 应用限制），不能接手它", "The user blocked background operation of ${pick.pkg} (Agent-VScreen › App rules); it can't be taken over"))
+    com.kilon.agentvscreen.core.Guard.require(com.kilon.agentvscreen.core.Guard.Act.TAKE, pick.pkg)
     // 1.2: taking the app the user is using off their screen is theirs to allow, on the phone.
     run { val app = VScreenKnowledge.label(pick.pkg) ?: pick.pkg
         com.kilon.agentvscreen.host.Consent.require(context, "handoff:${pick.pkg}", tr("把你正在用的 $app 接到后台副屏", "move $app, which you are using, to the background screen"), tr("它会从主屏消失，停在当前页面，由 Agent 在后台继续操作", "it leaves the main screen, stays on its current page, and the agent carries on in the background"), kind = "system") }
@@ -200,12 +201,20 @@ private fun VScreenOffloadHandler.handoffOut(sid: String, pkgArg: String?, msg: 
     val task = VScreenShell.taskIdOn(d0.displayId, pkg) ?: throw ActionError("HANDOFF_NO_TASK", tr("副屏上找不到 $pkg 的任务", "No task of $pkg on the screen"))
     return BackgroundOperation.agentAction(sid, null, isRead = false, describe = tr("交还：把副屏的 $pkg 移到主屏", "Hand back: move $pkg from the background screen to the main screen")) { _ ->
         val m = VScreenHandoff.move(task, pkg, 0)
+        if (m.ok) com.kilon.agentvscreen.core.VScreenMute.restore(pkg)
+        if (m.ok) com.kilon.agentvscreen.core.VScreenOwnership.handedOut(context, sid, pkg, task,
+            synchronized(VScreenOffloadHandler.lastActivity) { VScreenOffloadHandler.lastActivity[d0.displayId] })
         if (!m.ok) throw ActionError("HANDOFF_DENIED", tr("系统没有让 $pkg 移回主屏（${m.detail}）。替代：请用户点副屏悬浮窗 › 全屏 › 接管，自己完成这一步", "The system did not move $pkg back to the main screen (${m.detail}). Instead: ask the user to tap the floating window › Full screen › Take over and do the step themselves"))
         // The moved app is gone from the screen: if nothing is left on it, release it now, or the
         // floating window / full screen would keep showing its last (now dead) frame.
         VScreenHandoff.releaseEmptyScreen(sid, d0.displayId)
         val label = runCatching { context.packageManager.getApplicationInfo(pkg, 0).loadLabel(context.packageManager).toString() }.getOrDefault(pkg)
-        val notified = VScreenHandoff.alert(context, 7290, tr("$label 已交给你", "$label is yours now"), msg ?: tr("Agent 把 $label 停在当前页面交给你，请在主屏继续", "The agent left $label on the current page for you; carry on on the main screen"))
+        val who = com.kilon.agentvscreen.api.Agents.nameOfSession(sid)
+        val notified = VScreenHandoff.alert(context, com.kilon.agentvscreen.core.VScreenOwnership.nudgeId(pkg), tr("$label 已交给你", "$label is yours now"),
+            (msg ?: tr("「$who」把 $label 停在当前页面交给你，请在主屏继续。", "\"$who\" left $label on the current page for you; carry on on the main screen.")) +
+                tr("\n用完点“交回”，它会从你离开的页面接着做。", "\nWhen done, tap Hand back and it carries on from where you left it."),
+            com.kilon.agentvscreen.host.Needs.open(context, com.kilon.agentvscreen.host.Needs.Page.HOME, 1),
+            listOf(tr("交回", "Hand back") to com.kilon.agentvscreen.core.VScreenOwnership.handBackIntent(context, pkg)))
         text(run { val top = VScreenShell.topPackage(0) ?: "?"; tr("$pkg 已移到主屏最前面（${m.via}），停在交还时的页面；主屏现在是 $top。", "$pkg is now in front on the main screen (${m.via}), on the page it was handed back on; the main screen shows $top. ") } +
             (if (notified) tr("已通知用户。", "The user was notified.") else run { val why = VScreenHandoff.notifyBlocked(context) ?: tr("通知没发出", "the notification was not sent"); tr("没通知到用户（$why）。", "The user was not notified ($why). ") }) +
             tr("告诉用户接下来要做什么；之后不要再操作它，除非用户再让你接手（handoff in）", "Tell the user what to do next; don't operate it afterwards unless the user asks you to take it over again (handoff in)"))
@@ -221,21 +230,15 @@ internal fun VScreenOffloadHandler.mainTop(): String? = runCatching { VScreenShe
 internal fun VScreenOffloadHandler.mainTaskIds(): Set<Int>? =
     runCatching { VScreenHandoff.tasksOn(0).map { it.taskId }.toSet() }.getOrNull()?.takeIf { it.isNotEmpty() }
 
-/** Main-screen tasks listed in [before] that are gone now (empty when unknown). */
-internal fun VScreenOffloadHandler.mainTasksLost(before: Set<Int>?): Set<Int> {
-    if (before.isNullOrEmpty()) return emptySet()
-    val now = mainTaskIds() ?: return emptySet()
-    return before - now
-}
-
 // ── stop / release ───────────────────────────────────────────────────
 
 /** `stop [包名] [--force]`: close the app's task on the background screen (--force: kill the app, main screen too). */
 internal fun VScreenOffloadHandler.stopCmd(sid: String?, args: OffloadArgs): NativeOffloadResult {
     val s = sid ?: throw ActionError("NO_SESSION", tr("没有会话（请求头 X-VScreen-Session）", "No session (header X-VScreen-Session)"))
     val force = args.hasFlag("force")
-    val main0 = mainTop(); val tasks0 = mainTaskIds()
-    val pkgArg = args.positional.getOrNull(0)
+    val main0 = mainWatch(s)
+    // 1.4.0-beta13 (test: `stop 计算器` -> CLOSE_FAILED): an app name is resolved like launch does, not taken for a package.
+    val pkgArg = args.positional.getOrNull(0)?.let { VScreenKnowledge.resolveApp(it) ?: it }
     if (pkgArg != null && force && VScreenShell.isProtected(pkgArg)) throw ActionError("PROTECTED_APP", tr("$pkgArg 是 Agent-VScreen 自己、桌面或系统界面，不能 force-stop", "$pkgArg is Agent-VScreen itself, the launcher or system UI, and cannot be force-stopped"))
     if (force) {
         val target = pkgArg ?: runCatching { BackgroundOperation.previewDisplayFor(s)?.let { VScreenShell.topPackage(it.displayId) } }.getOrNull() ?: "?"
@@ -245,7 +248,9 @@ internal fun VScreenOffloadHandler.stopCmd(sid: String?, args: OffloadArgs): Nat
     val stopped = VScreenKnowledge.journey(s)
     VScreenKnowledge.endJourney(s)
     VScreenKnowledge.touch(s, stopped)
-    val msg = BackgroundOperation.agentAction(s, null, isRead = false, describe = if (force) tr("结束应用（force-stop）", "stop the app (force-stop)") else tr("关闭副屏上的应用", "close the app on the screen")) { d ->
+    // v18: closing an app needs no picture of the screen (a named package, or the top task), so a stale
+    // re-read flag must not block it; the flag stays set, and the next act still has to look first.
+    val msg = BackgroundOperation.agentAction(s, null, isRead = false, describe = if (force) tr("结束应用（force-stop）", "stop the app (force-stop)") else tr("关闭副屏上的应用", "close the app on the screen"), skipReread = true) { d ->
         if (!force) {
             VScreenShell.closeOnDisplay(d.displayId, pkgArg)?.let { o -> if (o.ok) return@agentAction o.message }
             throw ActionError("CLOSE_FAILED", tr("没能只关闭副屏里的任务（找不到它的 task）。要结束整个应用加 --force（主屏上的这个应用也会被结束；手机上会请用户确认）", "Could not close just the task on the screen (its task was not found). To stop the whole app add --force (the app on the main screen is stopped too; the user is asked to confirm on the phone)"))
@@ -254,15 +259,15 @@ internal fun VScreenOffloadHandler.stopCmd(sid: String?, args: OffloadArgs): Nat
         if (!o.ok) throw ActionError(o.code, o.message)
         o.message + tr("（force-stop：主屏上的同一个应用也被结束了）", " (force-stop: the same app on the main screen was stopped too)")
     }
-    return text(msg + (mainCheckLines(main0, tasks0)?.let { "\n${Blocks.notes}$it" } ?: ""))
+    return text(msg + (mainCheckLines(main0, s)?.let { "\n${Blocks.notes}$it" } ?: ""))
 }
 
 /** `release`: give the background screen back now (the connection stays; the next launch builds a new one). */
 internal fun VScreenOffloadHandler.releaseCmd(sid: String?): NativeOffloadResult {
     val s = sid ?: throw ActionError("NO_SESSION", tr("没有会话（请求头 X-VScreen-Session）", "No session (header X-VScreen-Session)"))
-    val main0 = mainTop(); val tasks0 = mainTaskIds()
+    val main0 = mainWatch(s)
     BackgroundOperation.releaseNow(s)
-    return text(tr("副屏已释放（连接保留，下次 launch 会新建副屏）", "Screen released (connection kept; the next launch creates a new screen)") + (mainCheckLines(main0, tasks0)?.let { "\n${Blocks.notes}$it" } ?: ""))
+    return text(tr("副屏已释放（连接保留，下次 launch 会新建副屏）", "Screen released (connection kept; the next launch creates a new screen)") + (mainCheckLines(main0)?.let { "\n${Blocks.notes}$it" } ?: ""))
 }
 
 /** 1.1 `done`: this session's turn ends now (screen idles, page kept, another session may take it over). */

@@ -83,7 +83,7 @@ class V120CoreTest {
     }
 
     @Test fun keysThatLeaveTheScreenDoNotExist() {
-        assertNull(VScreenShell.keyCode("home")); assertNull(VScreenShell.keyCode("3")); assertNull(VScreenShell.keyCode("26")); assertNull(VScreenShell.keyCode("187"))
+        assertNull(VScreenShell.keyCode("home")); assertEquals(10, VScreenShell.keyCode("3")); assertNull(VScreenShell.keyCode("03")); assertNull(VScreenShell.keyCode("26")); assertNull(VScreenShell.keyCode("187"))
         assertEquals(4, VScreenShell.keyCode("back")); assertEquals(66, VScreenShell.keyCode("ENTER")); assertEquals(61, VScreenShell.keyCode("61"))
     }
 

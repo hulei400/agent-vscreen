@@ -40,6 +40,9 @@ object VScreenPerception {
         @Volatile var ocrMs = 0L
         @Volatile var ocrEngine: String = VScreenOcr.ENGINE
         @Volatile var blankSince = 0L
+        /** 1.3: which cells keep moving on their own (video, carousel); fed with every frame. */
+        @Volatile var motion: MotionTrack? = null
+        var prevTiny: android.graphics.Bitmap? = null
         val lock = Object()
         var thread: Thread? = null
     }
@@ -65,9 +68,6 @@ object VScreenPerception {
     private fun watcher(displayId: Int): Watcher? = synchronized(watchers) { watchers[displayId]?.takeIf { it.running } }
 
     fun running(displayId: Int): Boolean = watcher(displayId) != null
-
-    /** When the frame of the latest reading was taken (elapsedRealtime; 0 = none). */
-    fun readingTime(displayId: Int): Long = watcher(displayId)?.readingAt ?: 0L
 
     /**
      * The latest OCR reading of a frame taken at or after [notBefore] (elapsedRealtime); when the latest is older a
@@ -99,7 +99,17 @@ object VScreenPerception {
         return try {
             synchronized(w.lock) {
                 if (sm.isRecycled || sm.width != cur.width || sm.height != cur.height) null
-                else if (VPixels.regionDiff(sm, cur, android.graphics.Rect(0, 0, cur.width, cur.height)) in 0.0..0.0005) r else null
+                // 1.3: a playing area differs in every frame; outside it the picture is the same, and so are its words.
+                // 1.4.0-beta5 (test: collect right after launching another app returned the previous app's words, 3 in
+                // 9): when the moving areas cover most of the picture (an animated weather background), "the same
+                // outside them" compares almost nothing, and another app's reading passed for this one. Then only the
+                // exact frame counts.
+                else {
+                    val m = mask(displayId)
+                    val skip = m?.rectsIn(cur.width, cur.height).orEmpty()
+                    if (m?.mostly == true) null
+                    else if (Change.same(sm, cur, Change.Level.TINY, skip = skip)) r else null
+                }
             }
         } finally { cur.recycle() }
     }
@@ -108,7 +118,7 @@ object VScreenPerception {
     internal fun offerReading(displayId: Int, frame: Bitmap, version: Long, r: VScreenOcr.Result, a11y: List<String>) {
         val w = watcher(displayId) ?: return
         if (r.error != null) return
-        val words = if (VScreenActivity.uniform(frame)) emptyList() else wordsOf(r.items, a11y)
+        val words = if (VScreenActivity.uniform(frame)) emptyList() else wordsOf(still(r.items, mask(displayId)), a11y)
         val sm = small(frame)
         synchronized(w.lock) {
             if (w.readingVersion > version) { sm.recycle(); return }
@@ -122,7 +132,6 @@ object VScreenPerception {
             }
             w.lock.notifyAll()
         }
-        VScreenOcr.remember(displayId, r.items)
     }
 
     /** Ask for a reading as soon as possible (a text condition is being waited for). */
@@ -143,15 +152,58 @@ object VScreenPerception {
     fun blankFor(displayId: Int): Long? = watcher(displayId)?.blankSince?.takeIf { it > 0 }
         ?.let { SystemClock.elapsedRealtime() - it }?.takeIf { it >= BLANK_MS }
 
+    /**
+     * 1.3: the areas of [displayId] that keep moving on their own right now (a playing video, a carousel), or null.
+     * Taken before an action, it tells the waits what not to wait for (see [MotionTrack]).
+     */
+    /** 1.3.0: an action of ours on [displayId] just happened (its motion is not the page's own). */
+    fun noteAction(displayId: Int, spanMs: Long = 0L) { val now = SystemClock.elapsedRealtime(); watcher(displayId)?.motion?.action(now - spanMs, now) }
+
+    fun mask(displayId: Int, minSpanMs: Long = MotionTrack.MIN_SPAN_MS): Mask? = watcher(displayId)?.let { w ->
+        val m = w.motion ?: return null
+        m.moving(SystemClock.elapsedRealtime(), minSpanMs)?.let { Mask(it, m.cols, m.rows, w.d.width, w.d.height) }
+    }
+
+    /** OCR items outside the moving areas (the words inside a playing video are not the page's words). */
+    // 1.4.0-beta5 (test: a game's title page listed no words, so `tap 进入世界` was NOT_FOUND although the words were
+    // read): when nearly everything moves, the moving areas are the app itself, not a video inside a page; its words
+    // are the page's words and stay listed.
+    internal fun still(items: List<VScreenOcr.Item>, mask: Mask?): List<VScreenOcr.Item> = if (mask == null || mask.mostly) items else items.filter { !mask.coversMostOf(it.box) }
+
     fun engine(displayId: Int): String? = watcher(displayId)?.let { it.ocrEngine + if (it.ocrMs > 0) tr("（约 ${it.ocrMs}ms/次）", " (about ${it.ocrMs}ms each)") else "" }
 
     /** The words of one reading: OCR lines (no junk) + accessibility texts, trimmed, one each by normalised form. */
     internal fun wordsOf(items: List<VScreenOcr.Item>, a11y: List<String>): List<String> {
         val seen = HashSet<String>()
         val out = ArrayList<String>()
-        for (t in items.filter { !VScreenOcr.isJunk(it) }.map { it.text.replace('\n', ' ').trim() } + a11y.map { it.replace('\n', ' ').trim() }) {
+        for (t in joinSplit(items.filter { !VScreenOcr.isJunk(it) }).map { it.replace('\n', ' ').trim() } + a11y.map { it.replace('\n', ' ').trim() }) {
             if (t.isEmpty() || t.length > 80) continue
             if (seen.add(VScreenOcr.norm(t))) out += t
+        }
+        return out
+    }
+
+    /**
+     * 1.3.0: OCR sometimes cuts one line into pieces ("Auracast 音频广" + "播"). Pieces on one line with almost no gap
+     * between them are one text again, so a word that went away is listed once, not as fragments.
+     */
+    internal fun joinSplit(items: List<VScreenOcr.Item>): List<String> {
+        val left = items.sortedWith(compareBy({ it.box.top }, { it.box.left })).toMutableList()
+        val out = ArrayList<String>()
+        while (left.isNotEmpty()) {
+            var cur = left.removeAt(0)
+            var text = cur.text.trim()
+            var box = android.graphics.Rect(cur.box)
+            while (true) {
+                val h = maxOf(1, box.height())
+                val next = left.filter { n -> Math.abs(n.box.centerY() - box.centerY()) <= h / 3 && Math.abs(n.box.height() - h) <= h / 2 &&
+                    n.box.left >= box.right - h / 4 && n.box.left - box.right <= h * 2 / 5 }.minByOrNull { it.box.left } ?: break
+                left.remove(next)
+                val nt = next.text.trim()
+                text += if (text.lastOrNull()?.let { it.code < 128 && it.isLetterOrDigit() } == true && nt.firstOrNull()?.let { it.code < 128 && it.isLetterOrDigit() } == true) " $nt" else nt
+                box.union(next.box); cur = next
+            }
+            out += text
         }
         return out
     }
@@ -176,7 +228,17 @@ object VScreenPerception {
             val now = SystemClock.elapsedRealtime()
             if (now - pkgAt > 5_000L || pkg == null) { pkg = VScreenShell.topPackage(d.displayId); pkgAt = now }
             VScreenRecorder.offer(d, fv.first, fv.second, pkg)
-            if (fv.second != lastVersion) { changedSinceOcr = fv.second != w.readingVersion; lastVersion = fv.second }
+            if (fv.second != lastVersion) {
+                changedSinceOcr = fv.second != w.readingVersion; lastVersion = fv.second
+                // 1.3: what changed since the last frame, cell by cell, for the moving-area track.
+                runCatching {
+                    val tiny = small(fv.first, 160)
+                    val rows = VScreenActivity.rowsFor(tiny.width, tiny.height)
+                    val mt = w.motion?.takeIf { it.rows == rows } ?: MotionTrack(VScreenActivity.COLS, rows).also { w.motion = it }
+                    VScreenActivity.cells(w.prevTiny, tiny, VScreenActivity.COLS, rows)?.let { mt.feed(now, it) }
+                    w.prevTiny?.recycle(); w.prevTiny = tiny
+                }
+            } else w.motion?.let { it.feed(now, BooleanArray(it.cols * it.rows)) }
             val uniform = VScreenActivity.uniform(fv.first)
             if (uniform) { if (w.blankSince == 0L) w.blankSince = now } else w.blankSince = 0L
             val forced = w.forceOcr
@@ -187,8 +249,8 @@ object VScreenPerception {
                 val r = runCatching { VScreenOcr.recognize(d.displayId, fv.first, fv.second, accurate = VScreenOcr.accurateEnabled()) }.getOrNull()
                 if (r != null) { w.ocrMs = r.ms; w.ocrEngine = r.engine }
                 if (r != null && r.error == null) {
-                    val a11y = runCatching { BackgroundOperation.a11yTexts(d.displayId, 200) }.getOrNull().orEmpty()
-                    val words = if (uniform) emptyList() else wordsOf(r.items, a11y)
+                    val a11y = runCatching { A11yTree.snapshot(d.displayId).texts(200) }.getOrNull().orEmpty()
+                    val words = if (uniform) emptyList() else wordsOf(still(r.items, mask(d.displayId)), a11y)
                     val sm = small(fv.first)
                     synchronized(w.lock) {
                         w.reading = r; w.readingAt = frameAt; w.readingVersion = fv.second
@@ -200,7 +262,6 @@ object VScreenPerception {
                         }
                         w.lock.notifyAll()
                     }
-                    VScreenOcr.remember(d.displayId, r.items)
                 }
             }
             synchronized(w.lock) { w.lock.notifyAll() }
@@ -209,7 +270,11 @@ object VScreenPerception {
             if (left > 0) Thread.sleep(left)
         }
         w.running = false
-        synchronized(w.lock) { w.lock.notifyAll() }
+        w.prevTiny?.recycle(); w.prevTiny = null
+        synchronized(w.lock) {
+            w.readingSmall?.recycle(); w.readingSmall = null
+            w.lock.notifyAll()
+        }
     }
 
     /** Small copy of [f] (long side [side]) for pixel comparisons; never the frame itself. */
